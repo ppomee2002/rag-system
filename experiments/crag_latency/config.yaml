@@ -1,0 +1,17 @@
+# configs/base.yaml 위에 덮어쓰는 값만 적는다.
+experiment: crag_latency
+
+crag:
+  grader:               # 비워두면 메인 llm 사용
+    provider: null
+    model: null
+  upper_threshold: 0.7
+  lower_threshold: 0.3
+  web_search:
+    provider: tavily
+    top_k: 5
+
+run:
+  pipelines: [vanilla, crag]
+  warmup_queries: 3     # 측정에서 제외할 초기 query 수 (cold start 영향 제거)
+  repeats: 1            # query 당 반복 측정 횟수
