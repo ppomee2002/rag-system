@@ -78,6 +78,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="experiments/crag_latency/config.yaml")
     parser.add_argument("--limit", type=int, default=None, help="dataset.limit override (테스트용)")
+    parser.add_argument(
+        "--resume", type=Path, default=None, help="중단된 run 폴더 (완료된 행은 건너뜀)"
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -93,8 +96,25 @@ def main() -> None:
     examples = examples[: cfg["dataset"]["limit"]]
     pipelines = {k: v for k, v in build_pipelines(cfg).items() if k in cfg["run"]["pipelines"]}
 
-    out_dir = Path(cfg["output_dir"]) / "crag_latency" / datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume:
+        out_dir = args.resume
+        # 강제 종료로 마지막 줄이 잘렸을 수 있으므로 정상 행만 남기고 다시 쓴다
+        rows = []
+        for line in (out_dir / "results.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        (out_dir / "results.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
+        )
+        done = {(r["query_id"], r["pipeline"], r["repeat"]) for r in rows}
+        print(f"resume {out_dir}: {len(done)} rows already done")
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(cfg["output_dir"]) / "crag_latency" / stamp
+        out_dir.mkdir(parents=True, exist_ok=True)
+        done = set()
     (out_dir / "config.yaml").write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
 
     warmup = cfg["run"]["warmup_queries"]
@@ -102,21 +122,37 @@ def main() -> None:
         for p in pipelines.values():
             p.run(ex)
 
-    with open(out_dir / "results.jsonl", "w", encoding="utf-8") as f:
+    n_errors = 0
+    with (
+        open(out_dir / "results.jsonl", "a", encoding="utf-8") as f,
+        open(out_dir / "errors.jsonl", "a", encoding="utf-8") as ferr,
+    ):
         for ex in tqdm(examples[warmup:]):
             # 실행 순서에 따른 캐시 효과를 줄이기 위해 query 마다 순서를 섞는다
             order = list(pipelines.items())
             random.shuffle(order)
             for name, pipeline in order:
                 for rep in range(cfg["run"]["repeats"]):
-                    res = pipeline.run(ex)
+                    if (ex.id, name, rep) in done:
+                        continue
+                    try:
+                        res = pipeline.run(ex)
+                    except Exception as e:  # API 오류 등: 기록 후 계속. --resume 으로 재시도
+                        n_errors += 1
+                        err = {"query_id": ex.id, "pipeline": name, "repeat": rep, "error": repr(e)}
+                        ferr.write(json.dumps(err, ensure_ascii=False) + "\n")
+                        ferr.flush()
+                        continue
                     row = asdict(res)
                     row["contexts"] = [d["id"] for d in row["contexts"]]
                     row["repeat"] = rep
                     row["gold_answers"] = ex.answers
                     row.update(score_all(res.answer, ex.answers))
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()  # 중단돼도 완료된 query 는 남도록
 
+    if n_errors:
+        print(f"{n_errors} errors -> {out_dir / 'errors.jsonl'} (--resume 으로 재시도)")
     print(f"saved -> {out_dir}")
 
 
