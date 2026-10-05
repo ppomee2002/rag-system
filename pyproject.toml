@@ -11,6 +11,17 @@ dependencies = [
     "tqdm>=4.66",
 ]
 
+[project.optional-dependencies]
+# C-RAG latency 실험용 (uv sync --extra crag). 기본 의존성과 분리해 chunking 실험 환경에 영향 없음
+crag = [
+    "anthropic>=1,<2",
+    "tavily-python>=0.5",
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.9",
+    "datasets>=3.0",
+    "matplotlib>=3.8",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

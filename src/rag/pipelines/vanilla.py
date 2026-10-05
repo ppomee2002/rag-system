@@ -32,4 +32,5 @@ class VanillaRAG:
             contexts=docs,
             e2e_latency=sw["elapsed"],
             stage_latencies=dict(timer.totals),
+            extra={"retrieval_scores": [d.score for d in docs]},
         )

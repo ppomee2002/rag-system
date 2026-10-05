@@ -98,5 +98,8 @@ class CRAG:
             corrective_action=action,
             grader_scores=scores,
             n_corrective_steps=n_corrective,
-            extra={"stage_counts": dict(timer.counts)},
+            extra={
+                "stage_counts": dict(timer.counts),
+                "retrieval_scores": [d.score for d in docs],  # 최초 retrieval score (난이도 기준)
+            },
         )

@@ -37,3 +37,14 @@ def test_incorrect_uses_web_only():
     assert res.corrective_action == "incorrect"
     assert res.n_corrective_steps == 1
     assert [d.id for d in res.contexts] == ["web"]
+
+
+def test_records_initial_retrieval_scores():
+    class ScoredRetriever(FakeRetriever):
+        def retrieve(self, query, top_k):
+            return [Document(id=str(i), text="d", score=1.0 - i / 10) for i in range(top_k)]
+
+    crag = CRAG(ScoredRetriever(), FakeLLM("0.1"), FakeWeb(), top_k=3)
+    res = crag.run(QAExample(id="q1", question="q?", answers=["a"]))
+    # incorrect 로 contexts 가 web 문서로 바뀌어도 최초 retrieval score 는 남는다
+    assert res.extra["retrieval_scores"] == [1.0, 0.9, 0.8]

@@ -1,6 +1,6 @@
 """Vanilla RAG / C-RAG 를 같은 query 셋에 실행하고 query 단위 결과를 jsonl 로 저장.
 
-    uv run python experiments/crag_latency/run.py --config experiments/crag_latency/config.yaml
+uv run python experiments/crag_latency/run.py --config experiments/crag_latency/config.yaml
 """
 
 import argparse
@@ -17,24 +17,56 @@ from tqdm import tqdm
 from rag.config import load_config
 from rag.data.loader import load_qa_jsonl
 from rag.eval.metrics import score_all
+from rag.llm.anthropic_llm import AnthropicLLM
 from rag.pipelines.crag import CRAG
 from rag.pipelines.vanilla import VanillaRAG
+from rag.retrieval.faiss_retriever import FaissRetriever
+from rag.retrieval.tavily_search import TavilyWebSearch
+
+
+def build_llm(llm_cfg: dict) -> AnthropicLLM:
+    if llm_cfg["provider"] != "anthropic":
+        raise ValueError(f"지원하지 않는 llm provider: {llm_cfg['provider']}")
+    return AnthropicLLM(
+        model=llm_cfg["model"],
+        temperature=llm_cfg.get("temperature", 0.0),
+        max_tokens=llm_cfg.get("max_tokens", 512),
+    )
 
 
 def build_pipelines(cfg: dict) -> dict:
-    """TODO: cfg 에 맞는 retriever / llm / web_search 구현체를 만들어 연결.
+    """cfg 에 맞는 retriever / llm / web_search 구현체를 만들어 연결.
 
     두 파이프라인이 *같은* retriever, llm 인스턴스를 공유해야 공정 비교가 된다.
     """
-    retriever = llm = web_search = None
-    raise NotImplementedError("retriever / llm / web_search 구현 후 연결")
+    rcfg = cfg["retriever"]
+    if rcfg["type"] != "faiss":
+        raise ValueError(f"지원하지 않는 retriever: {rcfg['type']}")
+    retriever = FaissRetriever(
+        index_path=rcfg["index_path"],
+        docs_path=rcfg["docs_path"],
+        model_name=cfg["embedding"]["model"],
+        query_prefix=rcfg.get("query_prefix", ""),
+        device=rcfg.get("device"),
+    )
+
+    llm = build_llm(cfg["llm"])
+    grader_cfg = cfg["crag"]["grader"]
+    grader_llm = build_llm({**cfg["llm"], **grader_cfg}) if grader_cfg.get("model") else None
+
+    wcfg = cfg["crag"]["web_search"]
+    if wcfg["provider"] != "tavily":
+        raise ValueError(f"지원하지 않는 web_search provider: {wcfg['provider']}")
+    web_search = TavilyWebSearch(search_depth=wcfg.get("search_depth", "basic"))
+
     return {
-        "vanilla": VanillaRAG(retriever, llm, top_k=cfg["retriever"]["top_k"]),
+        "vanilla": VanillaRAG(retriever, llm, top_k=rcfg["top_k"]),
         "crag": CRAG(
             retriever,
             llm,
             web_search,
-            top_k=cfg["retriever"]["top_k"],
+            grader_llm=grader_llm,
+            top_k=rcfg["top_k"],
             web_top_k=cfg["crag"]["web_search"]["top_k"],
             upper_threshold=cfg["crag"]["upper_threshold"],
             lower_threshold=cfg["crag"]["lower_threshold"],
@@ -45,13 +77,20 @@ def build_pipelines(cfg: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="experiments/crag_latency/config.yaml")
+    parser.add_argument("--limit", type=int, default=None, help="dataset.limit override (테스트용)")
     args = parser.parse_args()
 
     load_dotenv()
     cfg = load_config(args.config)
+    if args.limit is not None:
+        cfg["dataset"]["limit"] = args.limit
     random.seed(cfg["seed"])
 
-    examples = load_qa_jsonl(cfg["dataset"]["path"], cfg["dataset"]["limit"])
+    # PopQA 파일은 질문 유형(prop) 순으로 정렬돼 있어 앞에서 자르면 유형이 편향된다
+    # -> seed 고정 shuffle 후 limit 적용 (warmup 도 섞인 순서의 앞부분)
+    examples = load_qa_jsonl(cfg["dataset"]["path"])
+    random.Random(cfg["seed"]).shuffle(examples)
+    examples = examples[: cfg["dataset"]["limit"]]
     pipelines = {k: v for k, v in build_pipelines(cfg).items() if k in cfg["run"]["pipelines"]}
 
     out_dir = Path(cfg["output_dir"]) / "crag_latency" / datetime.now().strftime("%Y%m%d_%H%M%S")
