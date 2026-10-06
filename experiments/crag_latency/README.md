@@ -5,9 +5,17 @@ Vanilla RAG 와 C-RAG 의 답변 품질 / latency 를 비교하고, C-RAG 의 �
 ## 실행
 
 ```bash
-uv run python experiments/crag_latency/run.py --config experiments/crag_latency/config.yaml
+uv sync --extra crag
+# .env: ANTHROPIC_API_KEY, TAVILY_API_KEY, WIKIMEDIA_CONTACT
+
+uv run python experiments/crag_latency/prepare_data.py   # PopQA long-tail + Wikipedia 문서 수집
+uv run python experiments/crag_latency/build_index.py    # 청킹 -> bge 임베딩 -> FAISS
+uv run python experiments/crag_latency/run.py --config experiments/crag_latency/config.yaml [--limit 20]
 uv run python experiments/crag_latency/analyze.py results/crag_latency/<run_id>
 ```
+
+`analyze.py` 는 run 폴더에 `report.md` (결과 정리 표), `figures/` (component 구성, 난이도별 latency),
+`results_flat.csv` 를 만든다.
 
 ## 측정 항목 (query 단위, `results.jsonl`)
 
@@ -18,11 +26,17 @@ uv run python experiments/crag_latency/analyze.py results/crag_latency/<run_id>
 | `stage_latencies` | `retrieval` / `grading` / `rewrite` / `web_search` / `generation` |
 | `corrective_action` | `correct` / `ambiguous` / `incorrect` |
 | `grader_scores`, `n_corrective_steps` | 난이도 구분 기준 |
+| `extra.retrieval_scores` | 최초 retrieval score (top-k) |
 
 ## 난이도 구분
 
-기본값: C-RAG `corrective_action` 이 `correct` 이면 easy, 그 외 hard.
-`analyze.py` 의 `add_difficulty()` 에서 기준 변경 가능 (최대 grader score, 최초 retrieval score 등).
+`analyze.py` 의 `add_difficulty()` 에서 세 기준을 모두 계산해 각각 비교한다.
+
+| 기준 | easy / hard |
+|---|---|
+| `diff_action` | corrective action 이 `correct` 이면 easy, 그 외 hard |
+| `diff_grader` | 평균 grader score 3분위 (높을수록 easy) |
+| `diff_retrieval` | 최초 top-1 retrieval score 3분위 (높을수록 easy) |
 
 ## 공정 비교 체크리스트
 

@@ -1,5 +1,40 @@
 # configs/base.yaml 위에 덮어쓰는 값만 적는다.
+# dataset / embedding / retriever / llm 은 chunking 실험에 영향을 주지 않도록 base 대신 여기서 지정한다.
 experiment: crag_latency
+
+dataset:
+  name: popqa
+  path: data/processed/popqa_longtail.jsonl   # C-RAG 논문 long-tail subset (1,399 문항)
+  popularity_threshold: 100                   # s_pop < 100 을 long-tail 로 사용
+
+# prepare_data.py 가 수집하는 Wikipedia 문서 (PopQA subject / object 문서)
+corpus:
+  cache_dir: data/raw/wiki
+  pages_path: data/processed/popqa_wiki_pages.jsonl
+
+# base 의 chunking 값이 바뀌어도 이 실험의 corpus 가 바뀌지 않도록 고정
+chunking:
+  strategy: fixed
+  chunk_size: 512
+  chunk_overlap: 64
+
+embedding:
+  provider: sentence_transformers   # retrieval latency 측정을 위해 로컬 실행
+  model: BAAI/bge-base-en-v1.5
+
+retriever:
+  type: faiss
+  top_k: 5
+  index_path: data/processed/popqa_bge-base.faiss
+  docs_path: data/processed/popqa_chunks.jsonl
+  query_prefix: "Represent this sentence for searching relevant passages: "   # bge v1.5 query instruction
+  device: null          # null 이면 자동 (cuda 있으면 cuda)
+
+llm:
+  provider: anthropic
+  model: claude-haiku-4-5   # temperature 0 지원 + thinking 없음 → latency 분산 최소화
+  temperature: 0.0
+  max_tokens: 512
 
 crag:
   grader:               # 비워두면 메인 llm 사용
@@ -10,6 +45,7 @@ crag:
   web_search:
     provider: tavily
     top_k: 5
+    search_depth: basic
 
 run:
   pipelines: [vanilla, crag]
