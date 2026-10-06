@@ -48,3 +48,20 @@ def test_records_initial_retrieval_scores():
     res = crag.run(QAExample(id="q1", question="q?", answers=["a"]))
     # incorrect 로 contexts 가 web 문서로 바뀌어도 최초 retrieval score 는 남는다
     assert res.extra["retrieval_scores"] == [1.0, 0.9, 0.8]
+
+
+def test_parallel_grading_same_scores_and_faster():
+    import time
+
+    class SlowLLM(FakeLLM):
+        def generate(self, prompt, **kwargs):
+            if "Score:" in prompt:
+                time.sleep(0.05)
+                return "0.9" if "doc 0" in prompt else "0.1"
+            return "answer"
+
+    ex = QAExample(id="q1", question="q?", answers=["a"])
+    seq = CRAG(FakeRetriever(), SlowLLM("0"), FakeWeb(), top_k=5).run(ex)
+    par = CRAG(FakeRetriever(), SlowLLM("0"), FakeWeb(), top_k=5, parallel_grading=True).run(ex)
+    assert par.grader_scores == seq.grader_scores == [0.9, 0.1, 0.1, 0.1, 0.1]
+    assert par.stage_latencies["grading"] < seq.stage_latencies["grading"] / 2

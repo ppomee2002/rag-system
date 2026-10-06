@@ -59,19 +59,32 @@ def build_pipelines(cfg: dict) -> dict:
         raise ValueError(f"지원하지 않는 web_search provider: {wcfg['provider']}")
     web_search = TavilyWebSearch(search_depth=wcfg.get("search_depth", "basic"))
 
+    crag_kwargs = dict(
+        grader_llm=grader_llm,
+        top_k=rcfg["top_k"],
+        web_top_k=cfg["crag"]["web_search"]["top_k"],
+        upper_threshold=cfg["crag"]["upper_threshold"],
+        lower_threshold=cfg["crag"]["lower_threshold"],
+    )
     return {
         "vanilla": VanillaRAG(retriever, llm, top_k=rcfg["top_k"]),
-        "crag": CRAG(
-            retriever,
-            llm,
-            web_search,
-            grader_llm=grader_llm,
-            top_k=rcfg["top_k"],
-            web_top_k=cfg["crag"]["web_search"]["top_k"],
-            upper_threshold=cfg["crag"]["upper_threshold"],
-            lower_threshold=cfg["crag"]["lower_threshold"],
+        "crag": CRAG(retriever, llm, web_search, **crag_kwargs),
+        # grader 문서별 호출을 동시에 실행하는 변형 (grading latency 비교용)
+        "crag_parallel": CRAG(
+            retriever, llm, web_search, **crag_kwargs, parallel_grading=True, name="crag_parallel"
         ),
     }
+
+
+def apply_overrides(cfg: dict, overrides: list[str]) -> None:
+    """--set a.b=value 형식 override. value 는 YAML 로 해석한다 (예: [vanilla,crag], true)."""
+    for item in overrides:
+        key, _, raw = item.partition("=")
+        *parents, leaf = key.split(".")
+        node = cfg
+        for k in parents:
+            node = node[k]
+        node[leaf] = yaml.safe_load(raw)
 
 
 def main() -> None:
@@ -81,12 +94,16 @@ def main() -> None:
     parser.add_argument(
         "--resume", type=Path, default=None, help="중단된 run 폴더 (완료된 행은 건너뜀)"
     )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="KEY=VALUE", help="config override"
+    )
     args = parser.parse_args()
 
     load_dotenv()
     cfg = load_config(args.config)
     if args.limit is not None:
         cfg["dataset"]["limit"] = args.limit
+    apply_overrides(cfg, args.set)
     random.seed(cfg["seed"])
 
     # PopQA 파일은 질문 유형(prop) 순으로 정렬돼 있어 앞에서 자르면 유형이 편향된다

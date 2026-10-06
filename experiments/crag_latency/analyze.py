@@ -11,6 +11,7 @@
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from rag.pipelines.crag import STAGES
@@ -85,10 +86,73 @@ def pipeline_summary(df: pd.DataFrame) -> pd.DataFrame:
             **{q: g[q].mean() for q in QUALITY},
         }
     )
-    if {"vanilla", "crag"} <= set(out.index):
-        out.loc["crag / vanilla"] = out.loc["crag"] / out.loc["vanilla"]
-        out.loc["crag / vanilla", "n"] = None
+    for p in ("crag", "crag_parallel"):
+        if {"vanilla", p} <= set(out.index):
+            out.loc[f"{p} / vanilla"] = out.loc[p] / out.loc["vanilla"]
+            out.loc[f"{p} / vanilla", "n"] = None
     return out
+
+
+def _ci_row(name: str, point: float, boots: np.ndarray) -> dict:
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {"metric": name, "estimate": point, "ci95_low": lo, "ci95_high": hi}
+
+
+def paired_bootstrap(
+    df: pd.DataFrame, a: str, b: str, cols: list[str], n_boot: int = 2000, seed: int = 0
+) -> pd.DataFrame:
+    """같은 query 끼리 짝지어 resample. latency 는 b/a 배율과 차이, 품질은 b-a 차이의 95% CI."""
+    p = (
+        df[df.pipeline.isin([a, b])]
+        .pivot_table(index=["query_id", "repeat"], columns="pipeline", values=cols)
+        .dropna()
+    )
+    idx = np.random.default_rng(seed).integers(0, len(p), (n_boot, len(p)))
+    rows = []
+    for col in cols:
+        x, y = p[(col, a)].to_numpy(), p[(col, b)].to_numpy()
+        diff = (y.mean() - x.mean(), y[idx].mean(1) - x[idx].mean(1))
+        if col in QUALITY:
+            rows.append(_ci_row(f"{col}: {b} - {a}", *diff))
+        else:
+            ratio = (y.mean() / x.mean(), y[idx].mean(1) / x[idx].mean(1))
+            rows.append(_ci_row(f"{col}: {b} / {a}", *ratio))
+            rows.append(_ci_row(f"{col}: {b} - {a} (s)", *diff))
+    return pd.DataFrame(rows).set_index("metric")
+
+
+def corrective_effect(crag: pd.DataFrame, n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+    """corrective 발생 query 와 미발생 query 의 평균 차이 (비짝지음 bootstrap)."""
+    rng = np.random.default_rng(seed)
+    yes, no = crag[crag.is_corrective], crag[~crag.is_corrective]
+    rows = []
+    for col in ["e2e_latency", "acc"]:
+        y, n = yes[col].to_numpy(), no[col].to_numpy()
+        boots = y[rng.integers(0, len(y), (n_boot, len(y)))].mean(1) - n[
+            rng.integers(0, len(n), (n_boot, len(n)))
+        ].mean(1)
+        rows.append(_ci_row(f"{col}: corrective - non-corrective", y.mean() - n.mean(), boots))
+    return pd.DataFrame(rows).set_index("metric")
+
+
+def parallel_comparison(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """순차 grading (crag) vs 병렬 grading (crag_parallel)."""
+    sub = df[df.pipeline.isin(["vanilla", "crag", "crag_parallel"])]
+    g = sub.groupby("pipeline")
+    means = g[["e2e_latency", *T_COLS, *QUALITY]].mean()
+    means.insert(0, "n", g.size())
+    ci = paired_bootstrap(df, "crag", "crag_parallel", ["e2e_latency", "t_grading", *QUALITY])
+    key = ["query_id", "repeat"]
+    m = df[df.pipeline == "crag"].merge(df[df.pipeline == "crag_parallel"], on=key)
+    agree = pd.DataFrame(
+        {
+            "same_grader_scores": [(m.grader_scores_x == m.grader_scores_y).mean()],
+            "same_corrective_action": [(m.corrective_action_x == m.corrective_action_y).mean()],
+            "same_answer": [(m.answer_x == m.answer_y).mean()],
+        },
+        index=pd.Index([len(m)], name="n_pairs"),
+    )
+    return means, ci, agree
 
 
 def component_share(crag: pd.DataFrame) -> pd.DataFrame:
@@ -166,6 +230,7 @@ def plot_components(df: pd.DataFrame, path: Path) -> None:
 
     crag, vanilla = df[df.pipeline == "crag"], df[df.pipeline == "vanilla"]
     rows = {"Vanilla": vanilla, "C-RAG (all)": crag}
+    rows["C-RAG parallel grading"] = df[df.pipeline == "crag_parallel"]
     rows |= {f"C-RAG: {a}": crag[crag.corrective_action == a] for a in ACTIONS}
     rows = {k: v for k, v in rows.items() if len(v)}
     labels = [f"{k}  (n={len(v)})" for k, v in rows.items()][::-1]
@@ -293,6 +358,37 @@ def build_report(df: pd.DataFrame, run_dir: Path) -> str:
         ]
         if col != "diff_action":
             s += ["처리 경로 (corrective action 비율)", "", to_markdown(action_mix(crag, col)), ""]
+
+    s += [
+        "## 5. 95% 신뢰구간 (bootstrap 2,000회)",
+        "",
+        "### Vanilla vs C-RAG (같은 query 끼리 짝지은 paired bootstrap)",
+        "",
+        to_markdown(paired_bootstrap(df, "vanilla", "crag", ["e2e_latency", *QUALITY])),
+        "",
+        "### Corrective action 발생 효과 (C-RAG)",
+        "",
+        to_markdown(corrective_effect(crag)),
+        "",
+    ]
+    if "crag_parallel" in set(df.pipeline):
+        means, ci, agree = parallel_comparison(df)
+        s += [
+            "## 6. Grader 순차 vs 병렬 실행",
+            "",
+            "문서별 grader 호출을 동시에 실행 (crag_parallel). 같은 run 에서 같은 query 로 비교.",
+            "",
+            to_markdown(means),
+            "",
+            "### 순차 대비 병렬 (paired bootstrap 95% CI)",
+            "",
+            to_markdown(ci),
+            "",
+            "### 결과 일치율 (같은 query)",
+            "",
+            to_markdown(agree),
+            "",
+        ]
     return "\n".join(s)
 
 

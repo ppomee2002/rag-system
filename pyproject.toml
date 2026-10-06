@@ -8,6 +8,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "numpy>=1.26",
     "pandas>=2.2",
+    "sentence-transformers>=3.0",
     "tqdm>=4.66",
 ]
 
@@ -16,7 +17,6 @@ dependencies = [
 crag = [
     "anthropic>=1,<2",
     "tavily-python>=0.5",
-    "sentence-transformers>=3.0",
     "faiss-cpu>=1.9",
     "datasets>=3.0",
     "matplotlib>=3.8",

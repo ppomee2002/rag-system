@@ -11,6 +11,7 @@ retrieval / grading / rewrite / web_search / generation
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from rag.llm.base import LLM
 from rag.pipelines import prompts
@@ -34,7 +35,11 @@ class CRAG:
         web_top_k: int = 5,
         upper_threshold: float = 0.7,
         lower_threshold: float = 0.3,
+        parallel_grading: bool = False,
+        name: str = "crag",
     ):
+        self.name = name
+        self.parallel_grading = parallel_grading  # True 면 문서별 grader 호출을 동시에 실행
         self.retriever = retriever
         self.llm = llm
         self.grader_llm = grader_llm or llm
@@ -51,6 +56,12 @@ class CRAG:
         m = re.search(r"\d*\.?\d+", out)
         return min(max(float(m.group()), 0.0), 1.0) if m else 0.0
 
+    def grade_all(self, question: str, docs: list[Document]) -> list[float]:
+        if self.parallel_grading and len(docs) > 1:
+            with ThreadPoolExecutor(max_workers=len(docs)) as pool:
+                return list(pool.map(lambda d: self.grade(question, d), docs))
+        return [self.grade(question, d) for d in docs]
+
     def decide(self, scores: list[float]) -> str:
         if any(s >= self.upper for s in scores):
             return "correct"
@@ -66,12 +77,12 @@ class CRAG:
                 docs = self.retriever.retrieve(ex.question, self.top_k)
 
             with timer.stage("grading"):
-                scores = [self.grade(ex.question, d) for d in docs]
+                scores = self.grade_all(ex.question, docs)
             action = self.decide(scores)
 
-            contexts = [d for d, s in zip(docs, scores) if s >= self.lower]
+            contexts = [d for d, s in zip(docs, scores, strict=True) if s >= self.lower]
             if action == "correct":
-                contexts = [d for d, s in zip(docs, scores) if s >= self.upper]
+                contexts = [d for d, s in zip(docs, scores, strict=True) if s >= self.upper]
             else:
                 with timer.stage("rewrite"):
                     query = self.llm.generate(prompts.REWRITE.format(question=ex.question))
