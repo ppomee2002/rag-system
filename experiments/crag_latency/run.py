@@ -18,13 +18,21 @@ from rag.config import load_config
 from rag.data.loader import load_qa_jsonl
 from rag.eval.metrics import score_all
 from rag.llm.anthropic_llm import AnthropicLLM
+from rag.llm.ollama_llm import OllamaLLM
 from rag.pipelines.crag import CRAG
 from rag.pipelines.vanilla import VanillaRAG
 from rag.retrieval.faiss_retriever import FaissRetriever
 from rag.retrieval.tavily_search import TavilyWebSearch
 
 
-def build_llm(llm_cfg: dict) -> AnthropicLLM:
+def build_llm(llm_cfg: dict) -> AnthropicLLM | OllamaLLM:
+    if llm_cfg["provider"] == "ollama":
+        return OllamaLLM(
+            model=llm_cfg["model"],
+            temperature=llm_cfg.get("temperature", 0.0),
+            max_tokens=llm_cfg.get("max_tokens", 512),
+            num_ctx=llm_cfg.get("num_ctx", 8192),
+        )
     if llm_cfg["provider"] != "anthropic":
         raise ValueError(f"지원하지 않는 llm provider: {llm_cfg['provider']}")
     return AnthropicLLM(

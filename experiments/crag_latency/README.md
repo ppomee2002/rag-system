@@ -38,6 +38,19 @@ uv run python experiments/crag_latency/analyze.py results/crag_latency/<run_id>
 | `diff_grader` | 평균 grader score 3분위 (높을수록 easy) |
 | `diff_retrieval` | 최초 top-1 retrieval score 3분위 (높을수록 easy) |
 
+## Bad evidence 주입 실험 (`run_noise.py`)
+
+gold 문서를 고정하고 bad 문서(distracting / random)의 종류와 개수만 바꿔 답변 품질을 비교한다.
+latency 는 측정하지 않는다. 설정은 `config.yaml` 의 `noise:`.
+
+```bash
+uv run python experiments/crag_latency/run_noise.py --limit 203 --dry-run   # 문서 선택만 (LLM 호출 없음)
+uv run python experiments/crag_latency/run_noise.py --limit 203 [--resume results/crag_noise/<run_id>]
+```
+
+결과는 `results/crag_noise/<run_id>/` 에 `results.jsonl` (query x condition), `selection.jsonl`
+(query 별 gold / distracting / random 문서와 grader score), `report.md` 로 저장된다.
+
 ## 공정 비교 체크리스트
 
 - [ ] 두 pipeline 이 같은 retriever / LLM 인스턴스 사용

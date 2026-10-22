@@ -47,6 +47,15 @@ crag:
     top_k: 5
     search_depth: basic
 
+# run_noise.py (bad evidence 주입 실험) 전용
+noise:
+  n_bad: [1, 2, 4]              # gold 에 섞는 bad 문서 개수
+  candidate_k: 50               # distracting 후보를 뽑을 검색 깊이
+  filter_thresholds: [0.3, 0.5, 0.7]   # grader score 가 이 값 이상인 문서만 남김
+  # 실행 / 집계할 condition. null 이면 전부 (gold+rand{n}, dist{N} 등 포함). filter 는 모든 threshold
+  conditions: [gold, gold+dist4, filter]
+  gold_position: first         # first: context 맨 앞 (질문에서 멂) / last: 맨 뒤
+
 run:
   pipelines: [vanilla, crag]
   warmup_queries: 3     # 측정에서 제외할 초기 query 수 (cold start 영향 제거)
