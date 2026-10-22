@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from rag.llm.anthropic_llm import AnthropicLLM
+from rag.llm.ollama_llm import OllamaLLM
 from rag.retrieval.tavily_search import TavilyWebSearch
 
 
@@ -34,6 +35,23 @@ def test_anthropic_llm_passes_config_and_joins_text():
     assert call["extra_body"] == {"temperature": 0.0}
     assert call["max_tokens"] == 64
     assert call["messages"] == [{"role": "user", "content": "Q?"}]
+
+
+def test_ollama_llm_passes_options_and_rejects_truncated_prompt():
+    calls = []
+
+    def post(payload):
+        calls.append(payload)
+        return {"message": {"content": " Paris "}, "prompt_eval_count": 100}
+
+    llm = OllamaLLM("llama3.2", temperature=0.0, max_tokens=64, num_ctx=200, post=post)
+    assert llm.generate("Q?") == "Paris"
+    assert calls[0]["model"] == "llama3.2"
+    assert calls[0]["messages"] == [{"role": "user", "content": "Q?"}]
+    assert calls[0]["options"]["temperature"] == 0.0
+    assert calls[0]["options"]["num_predict"] == 64
+    with pytest.raises(RuntimeError):
+        llm.generate("Q?", max_tokens=150)
 
 
 class FakeTavily:
