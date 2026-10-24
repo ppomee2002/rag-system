@@ -1,0 +1,73 @@
+# configs/base.yaml 위에 덮어쓰는 값만 적는다.
+# corpus / retriever 는 crag_latency 실험과 동일 (같은 FAISS 인덱스를 재사용).
+experiment: correction_scheduling
+
+dataset:
+  name: popqa
+  path: data/processed/popqa_longtail.jsonl
+  limit: 203                # crag_latency / crag_noise 와 같은 seed shuffle + limit -> 같은 query 셋
+
+embedding:
+  provider: sentence_transformers
+  model: BAAI/bge-base-en-v1.5
+
+retriever:
+  type: faiss
+  top_k: 5
+  index_path: data/processed/popqa_bge-base.faiss
+  docs_path: data/processed/popqa_chunks.jsonl
+  query_prefix: "Represent this sentence for searching relevant passages: "
+  device: null
+
+# 로컬 단일 GPU 서빙. 스케줄링이 제어할 자원(GPU)이 내 쪽에 있어야 의미가 있으므로 API 대신 사용
+llm:
+  provider: ollama
+  model: llama3.1:8b
+  temperature: 0.0
+  max_tokens: 512
+  num_ctx: 6144             # 최대 prompt (chunk 5개, ~3.6k tokens) + max_tokens
+  host: http://127.0.0.1:11434   # localhost 는 Windows 에서 IPv6 시도로 호출마다 ~2초 지연
+
+# 실험 조건 기록용. ollama serve 를 이 환경변수로 띄운다 (GUI 앱 대신 headless)
+server:
+  OLLAMA_NUM_PARALLEL: 2   # 4 로 시작했으나 메모리 부족으로 중단 -> 2 로 재시작 (crag 200 은 순차라 영향 없음)
+  OLLAMA_KEEP_ALIVE: -1
+  OLLAMA_MAX_LOADED_MODELS: 1
+  backend: Vulkan (AMD Radeon RX 6700 XT 12GB)
+
+crag:
+  upper_threshold: 0.7
+  lower_threshold: 0.3
+  web_search:
+    # 외부 API 의 지연 변동 / 비용을 배제하기 위해 mock 사용:
+    # 지연은 crag_latency 실험에서 측정한 실제 Tavily web_search latency 를 query 별로 고정 추출,
+    # 문서는 rewrite 된 query 로 로컬 FAISS 검색 (품질 수치는 실제 web search 와 다름)
+    provider: mock
+    top_k: 5
+    latency_source:
+      - results/crag_latency/20261006_061040/results.jsonl
+      - results/crag_latency/20261006_113027/results.jsonl
+
+# 실험 1·2: query 를 하나씩 실행 (부하 없음) 하며 stage / LLM 호출 단위 trace 수집
+profile:
+  warmup_queries: 3
+  pipelines: [crag]                      # 전체 query
+  subset_pipelines: [vanilla, crag_parallel]   # 앞쪽 subset_n 개 query 에만 (참고 / 병렬 grading 비교)
+  subset_n: 50
+
+# 실험 3·4: 실험 1 trace 기반 discrete-event simulation
+sim:
+  loads: [0.3, 0.5, 0.7, 0.8, 0.9, 0.95]   # rho = 도착률 x 평균 GPU 작업량
+  n_queries: 3000
+  warmup_frac: 0.1
+  seeds: [0, 1, 2, 3, 4]
+  native_slots: 2                        # Ollama 내부 병렬 slot (processor sharing)
+  native_efficiency: 0.87                # 2개 이상 동시 처리 시 GPU 처리율 (probe: 4개 동시 8.7s / 순차 7.6s)
+  policies: [native, fifo_call, fifo_query, sjf_pred, srpt_est, srpt_oracle]
+
+# simulation 검증용 실제 동시 부하 실행
+live:
+  load: 0.8
+  n_queries: 40
+  seed: 0
+  policies: [native, fifo_call, srpt_est]

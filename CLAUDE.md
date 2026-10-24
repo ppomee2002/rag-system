@@ -1,8 +1,9 @@
 # CLAUDE.md
 
-RAG 실험 레포. 두 실험이 공통 코어를 공유한다.
+RAG 실험 레포. 실험들이 공통 코어를 공유한다.
 
 - **C-RAG latency** (`experiments/crag_latency/`): Vanilla RAG vs C-RAG 의 품질/E2E latency 비교, C-RAG 단계별(retrieval / grading / rewrite / web_search / generation) latency 분석, 난이도(corrective action)별 비교.
+- **Correction scheduling** (`experiments/correction_scheduling/`): 로컬 Ollama 위에서 C-RAG 동시 query 스케줄링 (profiling → workload 분석 → 동시 부하 → 스케줄링 정책 비교). 실험 3·4 는 실험 1 trace 기반 simulation.
 - **Chunking** (`experiments/chunking/`): 청킹 전략 비교. 다른 팀원 담당.
 
 ## 명령어
