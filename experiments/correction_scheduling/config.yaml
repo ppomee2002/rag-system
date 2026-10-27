@@ -62,7 +62,7 @@ sim:
   warmup_frac: 0.1
   seeds: [0, 1, 2, 3, 4]
   native_slots: 2                        # Ollama 내부 병렬 slot (processor sharing)
-  native_efficiency: 0.87                # 2개 이상 동시 처리 시 GPU 처리율 (probe: 4개 동시 8.7s / 순차 7.6s)
+  native_efficiency: 1.0                 # live 검증: native 실측이 1.0 simulation 과 일치 (0.87 은 4 slot probe 기반, 기각)
   policies: [native, fifo_call, fifo_query, sjf_pred, srpt_est, srpt_oracle]
 
 # simulation 검증용 실제 동시 부하 실행

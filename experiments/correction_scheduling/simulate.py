@@ -39,7 +39,7 @@ def load_jobs(run_dir: Path, parallel_grading: bool = False):
 
 
 POLICY_LABEL = {
-    "native": "native (Ollama 병렬 slot, FIFO)",
+    "native": "native (Ollama parallel slots)",
     "fifo_call": "gate FIFO (call)",
     "fifo_query": "gate FCFS (query)",
     "sjf_pred": "gate SJF (predicted)",
