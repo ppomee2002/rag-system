@@ -1,0 +1,1 @@
+{"provider":"ollama_native","base_url":"http://127.0.0.1:11434","model":"llama3.1:8b","max_tokens":512,"num_ctx":6144,"temperature":0.0,"upper":0.7,"lower":0.3,"team_prompts":true}

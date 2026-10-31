@@ -1,0 +1,1 @@
+{"provider":"openai","base_url":"https://api.openai.com/v1","model":"gpt-4.1-mini-2025-04-14","max_tokens":128,"temperature":0.0,"upper":0.7,"lower":0.3}
