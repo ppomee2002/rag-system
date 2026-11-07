@@ -1,1 +1,94 @@
-{"loads":[0.3,0.5,0.7,0.8,0.9,0.95],"seeds":[0,1,2,3,4],"n_queries":3000,"warmup_frac":0.1,"aging_alphas":[0.1,0.5,1.0],"workload_scope":"local Ollama model-server duration; may include CPU offload; not pure GPU kernel time"}
+{
+  "loads": [
+    0.3,
+    0.5,
+    0.7,
+    0.8,
+    0.9,
+    0.95
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "n_queries": 3000,
+  "warmup_frac": 0.1,
+  "aging_alphas": [
+    0.1,
+    0.5,
+    1.0
+  ],
+  "workload_scope": "local Ollama model-server duration; may include CPU offload; not pure GPU kernel time",
+  "threshold_study": {
+    "threshold_candidates_seconds": [
+      30,
+      60,
+      120,
+      240
+    ],
+    "calibration_loads": [
+      0.5,
+      0.8,
+      0.95
+    ],
+    "calibration_seeds": [
+      100,
+      101,
+      102
+    ],
+    "aging_alpha": 0.5,
+    "grading_variant": "lazy_hit",
+    "trace_repeat": 0,
+    "selection_rule": "Minimize mean across calibration workloads of 0.5*(overall mean / SRPT mean) + 0.5*(Correction p95 / SRPT Correction p95); ties choose smaller T. Freeze before evaluation. Same original question pool, disjoint arrival seeds."
+  },
+  "rescue_study": {
+    "calibration_seeds": [
+      200,
+      201,
+      202
+    ],
+    "evaluation_seeds": [
+      10,
+      11,
+      12,
+      13,
+      14
+    ],
+    "threshold_percentiles": [
+      90,
+      95,
+      99
+    ],
+    "aging_alpha": 0.5,
+    "old_threshold_seconds": 30,
+    "trace_repeat": 0,
+    "selection_rule": "Minimize arithmetic mean of paired overall-mean latency ratios to plain SRPT across calibration workloads. SRPT no-rescue is eligible with score 1. Finite challenger selected independently for comparison; tie prefers larger T. T candidates = ceil pooled post-warmup SRPT cumulative wait p90/p95/p99 across all calibration loads/seeds. No correction weight."
+  },
+  "tradeoff_study": {
+    "thresholds_seconds": [
+      30,
+      60,
+      120,
+      240,
+      480
+    ],
+    "aging_alphas": [
+      0.1,
+      0.5,
+      1.0
+    ],
+    "seeds": [
+      30,
+      31,
+      32,
+      33,
+      34
+    ],
+    "trace_repeat": 0,
+    "primary_reference_alpha": 0.5,
+    "selection": "None: report every prespecified T; descriptive dominance at each load, not final holdout tuning"
+  }
+}

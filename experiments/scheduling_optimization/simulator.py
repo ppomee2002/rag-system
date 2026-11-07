@@ -199,6 +199,8 @@ class _Run:
     pending: int = 0
     finish: float = math.nan
     gpu_wait: float = 0.0
+    last_rescue_wait: float = 0.0
+    rescue_count: int = 0
 
 
 @dataclass
@@ -218,7 +220,7 @@ def _priority(policy: str, run: _Run, call: Call, now: float, model: CostModel) 
         return run.arrival
     if policy == "sjf_pred":
         return job.pred_total
-    if policy == "srpt_est":
+    if policy in ("srpt_est", "srpt_threshold", "srpt_rescue"):
         if call.kind == "grade":
             return (job.n_docs - call.idx) * model.call_est("grade", call.chars) + job.pred_post
         return model.est_remaining(call.kind, call.idx, call.chars, job.n_docs, job.feats)
@@ -236,9 +238,27 @@ def simulate(
     native_slots: int = 4,
     efficiency: float = 1.0,
     aging_alpha: float = 0.0,
+    wait_threshold: float | None = None,
+    dispatch_log: list | None = None,
+    dispatch_stats: dict | None = None,
 ) -> list[_Run]:
     """jobs[i] 가 arrivals[i] 에 도착. efficiency: 동시 처리 2개 이상일 때 GPU 처리율 배수."""
     import heapq
+
+    if policy in ("srpt_threshold", "srpt_rescue"):
+        if wait_threshold is None or not math.isfinite(wait_threshold) or wait_threshold < 0:
+            raise ValueError("srpt_threshold requires a finite nonnegative wait_threshold")
+        if aging_alpha != 0:
+            raise ValueError("Threshold policy replaces Aging; combining them is not supported")
+    elif wait_threshold is not None:
+        raise ValueError("wait_threshold is only a dispatch parameter for srpt_threshold")
+    if aging_alpha < 0 or not math.isfinite(aging_alpha):
+        raise ValueError("aging_alpha must be finite and nonnegative")
+
+    if dispatch_stats is not None:
+        dispatch_stats.update(total_dispatches=0, rescue_dispatches=0, srpt_override_dispatches=0,
+                              shorter_bypass_events=0, noncorrection_shorter_bypass_events=0,
+                              max_consecutive_overrides=0, current_consecutive_overrides=0)
 
     slots = native_slots if policy == "native" else 1
     runs = [_Run(j, a) for j, a in zip(jobs, arrivals, strict=True)]
@@ -271,7 +291,43 @@ def simulate(
                     queue, (_priority(policy, run, c, t, model), seq, _Active(run, c, c.service, t, _priority(policy, run, c, t, model)))
                 )
 
+    def record_dispatch(a, queued, rescued):
+        if dispatch_stats is None:
+            return
+        shorter = [other for _, _, other in queued if other.base_priority < a.base_priority]
+        dispatch_stats['total_dispatches'] += 1
+        dispatch_stats['rescue_dispatches'] += int(rescued)
+        dispatch_stats['srpt_override_dispatches'] += int(bool(shorter))
+        dispatch_stats['shorter_bypass_events'] += len(shorter)
+        dispatch_stats['noncorrection_shorter_bypass_events'] += sum(other.run.job.action == 'correct' for other in shorter)
+        dispatch_stats['current_consecutive_overrides'] = (dispatch_stats['current_consecutive_overrides'] + 1 if shorter else 0)
+        dispatch_stats['max_consecutive_overrides'] = max(dispatch_stats['max_consecutive_overrides'], dispatch_stats['current_consecutive_overrides'])
+
     def fill(t: float):
+        # Calls are nonpreemptive: reconsider only when a server slot is free.
+        if len(active) >= slots:
+            return
+        if policy in ("srpt_threshold", "srpt_rescue") and queue:
+            def threshold_key(item):
+                _, serial, a = item
+                waited = a.run.gpu_wait + t - a.enqueued
+                # Strictly > T. Among overdue requests use longest cumulative wait.
+                # Ties use immutable SRPT estimate, then enqueue serial.
+                return ((0, -waited, a.base_priority, serial) if waited - (a.run.last_rescue_wait if policy == "srpt_rescue" else 0.0) > wait_threshold
+                        else (1, a.base_priority, 0.0, serial))
+            chosen = min(range(len(queue)), key=lambda i: threshold_key(queue[i]))
+            _, _, a = queue.pop(chosen)
+            heapq.heapify(queue)
+            a.run.gpu_wait += t - a.enqueued
+            rescued = policy in ("srpt_threshold", "srpt_rescue") and a.run.gpu_wait - (a.run.last_rescue_wait if policy == "srpt_rescue" else 0.0) > wait_threshold
+            if policy == "srpt_rescue" and rescued:
+                a.run.last_rescue_wait = a.run.gpu_wait
+                a.run.rescue_count += 1
+            record_dispatch(a, queue, rescued)
+            if dispatch_log is not None:
+                dispatch_log.append((t, a.run.job.qid, a.call.kind, a.call.idx, a.run.gpu_wait))
+            active.append(a)
+            return
         if aging_alpha and queue:
             # Re-evaluate immutable base priority at every dispatch. Age is
             # cumulative queue wait, never total time including GPU execution.
@@ -281,6 +337,9 @@ def simulate(
         while queue and len(active) < slots:
             _, _, a = heapq.heappop(queue)
             a.run.gpu_wait += t - a.enqueued
+            record_dispatch(a, queue, False)
+            if dispatch_log is not None:
+                dispatch_log.append((t, a.run.job.qid, a.call.kind, a.call.idx, a.run.gpu_wait))
             active.append(a)
 
     while events or active or queue:
@@ -309,7 +368,7 @@ def poisson_arrivals(n: int, rate: float, rng: np.random.Generator) -> list[floa
     return np.cumsum(rng.exponential(1.0 / rate, n)).tolist()
 
 
-def summarize(runs: list[_Run], warmup_frac: float = 0.0) -> dict:
+def summarize(runs: list[_Run], warmup_frac: float = 0.0, threshold_seconds: float | None = None) -> dict:
     runs = runs[int(len(runs) * warmup_frac) :]
     e2e = np.array([r.finish - r.arrival for r in runs])
     corr = np.array([r.job.action != "correct" for r in runs])
@@ -330,5 +389,10 @@ def summarize(runs: list[_Run], warmup_frac: float = 0.0) -> dict:
         "p95_correct": q(e2e[~corr], 95),
         "p95_corrected": q(e2e[corr], 95),
         "mean_gpu_wait": float(np.mean([r.gpu_wait for r in runs])),
+        "max_gpu_wait": float(max(r.gpu_wait for r in runs)),
+        "threshold_exceed_fraction": (float(np.mean([r.gpu_wait > threshold_seconds for r in runs]))
+                                      if threshold_seconds is not None else math.nan),
+        "n_requests": len(runs),
+        "n_corrected": int(corr.sum()),
         "throughput": len(runs) / span,
     }
