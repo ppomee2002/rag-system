@@ -3,6 +3,7 @@
 RAG 실험 레포. 두 실험이 공통 코어를 공유한다.
 
 - **C-RAG latency** (`experiments/crag_latency/`): Vanilla RAG vs C-RAG 의 품질/E2E latency 비교, C-RAG 단계별(retrieval / grading / rewrite / web_search / generation) latency 분석, 난이도(corrective action)별 비교.
+- **CRAG System** (`experiments/crag_system/`, 브랜치 `exp/crag-system`): LangGraph + vLLM + Custom Scheduler 통합 실험 (`SYS-1`~`SYS-4`). 엔진 추상화 `rag.llm.engine` / 호출 기록 `rag.telemetry`. 서버 점검 스크립트 `scripts/server/` (Claude 는 서버에 접속하지 않음).
 - **Chunking** (`experiments/chunking/`): 청킹 전략 비교. 다른 팀원 담당.
 
 ## 명령어

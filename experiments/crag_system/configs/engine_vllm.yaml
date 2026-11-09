@@ -1,0 +1,15 @@
+# configs/base.yaml 위에 덮어쓰는 값. 주 추론 엔진 (vLLM, OpenAI 호환 서버).
+# 서버는 scripts/server/launch_vllm.sh 로 띄운다. 이 값들은 launch 설정과 짝이 맞아야 한다.
+experiment: crag_system
+
+llm:
+  provider: vllm
+  model: meta-llama/Llama-3.1-8B-Instruct   # launch 의 MODEL (또는 --served-model-name) 과 동일해야 함
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY                 # 키 값은 환경변수로만. config / 로그에 쓰지 않는다
+  temperature: 0.0
+  max_tokens: 512
+  seed: 0
+  stream: true                              # TTFT 측정
+  send_priority: false                      # SYS-3 priority 모드에서만 true (launch 가 --scheduling-policy priority 일 때)
+  timeout: 600

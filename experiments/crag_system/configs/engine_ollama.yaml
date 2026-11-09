@@ -1,0 +1,18 @@
+# configs/base.yaml 위에 덮어쓰는 값. 기존 실험 (L-CL, L-CS) 재현 / 엔진 bridge 비교용 Ollama.
+# 기존 조건: llama3.1:8b, temperature 0, num_ctx 6144, max_tokens 512, OLLAMA_NUM_PARALLEL=2.
+experiment: crag_system
+
+llm:
+  provider: ollama
+  model: llama3.1:8b              # 기본 태그는 4bit 양자화. run_meta.engines.*.model_info 에 quantization 기록됨
+  temperature: 0.0
+  max_tokens: 512
+  num_ctx: 6144
+  host: http://127.0.0.1:11434    # 공유 서버에서 다른 사용자의 Ollama 와 겹치면 OLLAMA_HOST 포트를 바꾸고 여기도 변경
+  timeout: 600
+
+# 기록용: ollama serve 를 이 환경변수로 띄운다
+server:
+  OLLAMA_NUM_PARALLEL: 2
+  OLLAMA_KEEP_ALIVE: -1
+  OLLAMA_MAX_LOADED_MODELS: 1
