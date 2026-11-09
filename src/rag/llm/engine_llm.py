@@ -3,8 +3,11 @@
 기존 pipeline (`CRAG`, `VanillaRAG`) 을 수정하지 않고 엔진·호출 기록·스케줄링 gate 를 붙인다.
 동시 실행 시 query 마다 `EngineLLM` 을 하나씩 만들고 (자기 `CallRecorder`), 엔진과 gate 는 공유한다.
 
-gate 는 기존 `LLMGate` (exp/correction-scheduling) 와 같은 인터페이스:
-`acquire(priority)`, `release()`.
+스케줄링 연결 방법은 두 가지다.
+  scheduler + query_state : `rag.scheduling.SchedulingGate`
+    (동적 우선순위, K slots, vLLM priority 전달)
+  gate + priority_fn      : 기존 `LLMGate` (exp/correction-scheduling) 와 같은 정적 인터페이스
+                            `acquire(priority)`, `release()`.
 """
 
 from __future__ import annotations
@@ -38,22 +41,39 @@ class EngineLLM:
         engine_priority_fn: EnginePriorityFn | None = None,
         gate: Gate | None = None,
         kind_fn: Callable[[str], str] = infer_call_kind,
+        scheduler=None,  # rag.scheduling.SchedulingGate
+        query_state=None,  # rag.scheduling.QueryState (scheduler 사용 시 필수)
     ):
+        if scheduler is not None and query_state is None:
+            raise ValueError("scheduler 를 쓰려면 query_state 가 필요")
+        if scheduler is not None and gate is not None:
+            raise ValueError("scheduler 와 gate 는 함께 쓰지 않는다")
         self.engine = engine
         self.recorder = recorder
         self.priority_fn = priority_fn
         self.engine_priority_fn = engine_priority_fn
         self.gate = gate
         self.kind_fn = kind_fn
+        self.scheduler = scheduler
+        self.query_state = query_state
 
     def generate(self, prompt: str, **kwargs) -> str:
         kind = kwargs.get("kind") or self.kind_fn(prompt)
         idx = self.recorder.next_idx(kind) if self.recorder else 0
         t_enqueue = time.perf_counter()
-        priority = self.priority_fn(kind, idx, prompt) if self.priority_fn else None
-        if priority is None:
-            priority = t_enqueue
-        engine_priority = self.engine_priority_fn(priority) if self.engine_priority_fn else None
+        ticket = None
+        priority = None
+        engine_priority = None
+        if self.scheduler is not None:
+            ticket = self.scheduler.acquire(self.query_state, kind, idx, len(prompt))
+            priority = ticket.base
+            engine_priority = ticket.engine_priority
+        else:
+            priority = self.priority_fn(kind, idx, prompt) if self.priority_fn else None
+            if priority is None:
+                priority = t_enqueue
+            if self.engine_priority_fn:
+                engine_priority = self.engine_priority_fn(priority)
         request = LLMRequest(
             prompt=prompt,
             kind=kind,
@@ -77,20 +97,26 @@ class EngineLLM:
             t_end = time.perf_counter()
             if self.gate is not None:
                 self.gate.release()
+            if ticket is not None:
+                self.scheduler.release(ticket)
             if self.recorder is not None:
                 self._record(
-                    kind, idx, priority, prompt, t_enqueue, t_start, t_end, response, error
+                    kind, idx, priority, prompt, t_enqueue, t_start, t_end, response, error, ticket
                 )
 
-    def _record(self, kind, idx, priority, prompt, t_enqueue, t_start, t_end, response, error):
+    def _record(
+        self, kind, idx, priority, prompt, t_enqueue, t_start, t_end, response, error, ticket=None
+    ):
         r = self.recorder
         server = response.server if response else {}
         t_first = response.t_first_token if response else None
+        uses_priority = self.gate is not None or self.priority_fn or ticket is not None
         self.recorder.add(
             CallRecord(
                 kind=kind,
                 idx=idx,
-                priority=priority if self.gate is not None or self.priority_fn else None,
+                priority=priority if uses_priority else None,
+                dispatch_key=list(ticket.key_at_grant) if ticket else None,
                 engine_priority=response.priority_sent if response else None,
                 t_enqueue=r.rel(t_enqueue),
                 t_start=r.rel(t_start),
