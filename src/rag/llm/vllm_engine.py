@@ -144,6 +144,20 @@ class VLLMEngine:
         """Prometheus `/metrics` 원문. 지표 이름은 vLLM 버전마다 다를 수 있다."""
         return self.transport.get_text(f"{self.server_root}/metrics", self._headers())
 
+    def reset_prefix_cache(self) -> dict:
+        """조건 사이 prefix cache 초기화 (`POST /reset_prefix_cache`).
+
+        이 endpoint 는 버전에 따라 없거나 개발 모드 (`VLLM_SERVER_DEV_MODE=1`) 에서만 열릴 수 있다.
+        실패해도 예외 대신 결과를 돌려주고 runner 가 run_end.json 에 기록한다.
+        """
+        try:
+            with self.transport._request(
+                f"{self.server_root}/reset_prefix_cache", {}, self._headers(), "POST"
+            ) as resp:
+                return {"ok": True, "status": resp.status}
+        except EngineError as e:
+            return {"ok": False, "status": e.status, "error": str(e)[:300]}
+
     def describe(self) -> dict[str, Any]:
         return {
             "engine": self.name,

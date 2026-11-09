@@ -134,3 +134,76 @@ mode 는 `sequential` / `live` / `trace_sim` 으로 결과에 반드시 표시�
 ## 서버 점검 (사용자 실행)
 
 `scripts/server/README.md` 참고.
+
+## 구현된 구성요소 (GPU 없이 완성, mock 으로 기능 검증)
+
+| 구성요소 | 위치 | 비고 |
+|---|---|---|
+| 추론 엔진 | `rag.llm.engine`, `ollama_engine`, `vllm_engine`, `engine_llm`, `factory` | 기존 `LLM.generate()` 유지 |
+| LangGraph CRAG | `rag.graph.CRAGGraph` | 기존 `CRAG` 와 Full 동등성 테스트 (3분기 × 순차/병렬) |
+| Grading 전략 | `rag.grading` (`full`, `lazy_hit`, `lazy_rest`, `batch`, `adaptive`) | 같은 인터페이스 `grade(question, docs, llm, upper, lower)` |
+| Scheduler | `rag.scheduling` (`SchedulingGate`, `FCFS`, `FCFSQuery`, `SRPTEst`, `Aging`, `WaitThreshold`, `CostModel`, `LLMGate`) | K slots, 동적 우선순위, vLLM priority 전달 |
+| Web 기록/재생 | `rag.retrieval.web_cache` | 실제 Tavily 기록 → 같은 문서로 지연 recorded / zero 재생 |
+| Runner | `experiments/crag_system/runner.py`, `run.py` | sequential / live, 결과 `queries.jsonl`, `calls.jsonl`, `run_meta.json` 외 |
+| Workload | `workload.py`, `make_workload.py` | 요청 순서·도착 시각 + sha256, 덮어쓰기 금지 |
+| Cost model 학습 | `fit_cost_model.py` | sequential run trace → SRPT-est 모델 json |
+
+테스트 (`uv run pytest`) 는 실제 시스템 코드의 기능 검증용이다. mock / 가짜 엔진 결과를 정확도·성능 결과로 쓰지 않는다.
+
+## 실행 예 (서버, GPU 권한을 받은 뒤)
+
+```bash
+CFG=experiments/crag_system/config.yaml
+# SYS-1: Baseline (vLLM, Full CRAG / Vanilla), 203문항 sequential
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1b
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1b --set pipeline=vanilla
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1b --set pipeline=crag   # 기준 구현
+# SYS-1c: 엔진 bridge (같은 조건, Ollama)
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1c \
+  --overlay experiments/crag_system/configs/engine_ollama.yaml
+
+# SYS-2: grading 전략 (sequential)
+for s in full lazy_hit batch adaptive; do
+  uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-2a --set grading.strategy=$s
+done
+
+# SYS-3 / SYS-4: 동시 요청 (live)
+uv run python experiments/crag_system/fit_cost_model.py results/crag_system/SYS-2a/<full run> \
+  --service-key wall --out results/crag_system/cost_models/full_wall.json
+uv run python experiments/crag_system/make_workload.py --name rho0.8_s0 --n 500 --rho 0.8 \
+  --capacity-rps <측정값> --seed 0
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3a \
+  --workload results/crag_system/workloads/rho0.8_s0.json \
+  --set run.mode=live --set scheduler.policy=srpt_est --set scheduler.slots=4 \
+  --set scheduler.aging_alpha=0.5 \
+  --set "scheduler.cost_model={path: results/crag_system/cost_models/full_wall.json}"
+```
+
+조건 비교 시 같은 workload 파일, 같은 vLLM launch 설정, 같은 GPU 할당을 쓰고 `run_meta.json` 으로 확인한다.
+
+## Correction-aware: SRPT-est 와의 차이 (구현 보류, 정의 확정 후 구현)
+
+- **SRPT-est (구현됨)**: 호출이 대기열에 들어갈 때 "이 query 의 남은 작업량" 추정으로 순서를 정한다.
+  grading 이 끝나 correction 이 확정되면 rewrite 호출의 추정치가 `rewrite + correction 후 generation`
+  으로 커져서, correction query 는 바로 그 시점부터 뒤로 밀린다. correction 상태를 "비용이 커진 것" 으로만 본다.
+- **Correction-aware (제안)**: correction 상태를 비용이 아니라 별도 신호로 쓴다.
+  - CA-1 rewrite boost: correction 이 확정된 query 의 rewrite 호출 (출력이 짧음) 만 최우선. web search
+    (GPU 를 쓰지 않는 외부 지연) 를 빨리 시작해 다른 query 의 GPU 작업과 겹치게 한다.
+  - CA-2 slowdown-aware: 경과시간 대비 남은 작업량으로 우선순위.
+  - CA-3 class slack: correction / 비correction 별 목표 지연 대비 여유.
+- 구현 위치: `rag.scheduling.policies` 에 Policy 하나 추가 (QueryState.action / corrected 를 이미 제공).
+  `build_policy({"policy": "correction_aware"})` 는 지금은 NotImplementedError.
+
+## 실제 GPU 에서 검증해야 하는 것
+
+| 항목 | 이유 | 확인 방법 |
+|---|---|---|
+| vLLM priority 필드 처리 / 낮을수록 먼저 / FCFS 서버의 거부 여부 | 버전마다 다름 | `probe_engine.py` priority, priority_order |
+| `VLLM_API_KEY` 환경변수 인증 | 버전마다 다름 | probe auth |
+| `/metrics` 지표 이름, `/reset_prefix_cache` 사용 가능 여부 | 버전·dev mode | probe metrics, `run.reset_prefix_cache=true` 결과 (`run_end.json`) |
+| Llama 3.1 이 batch grading JSON 을 지키는 비율 | 모델 출력 | SYS-2 `extra.grading.info.batch_status`, fallback 수 |
+| 같은 prompt 의 결정성 (temperature 0, batching) | continuous batching 비결정성 | probe determinism, 같은 조건 반복 run 의 답 일치율 |
+| K 별 처리량, μ_max (ρ 기준) | 하드웨어 의존 | probe sweep, 포화 부하 live run |
+| cost model 예측 정확도 (wall 기반) | vLLM 은 요청 단위 서버 시간 없음 | SYS-2 trace 로 OOF 오차 확인 |
+| Adaptive 임계값 | 데이터 기반 튜닝 필요 | dev split 에서 튜닝 후 고정 |
+| 다른 사용자 GPU 간섭 | 공유 서버 | `run_meta.json` / `run_end.json` 의 `gpu`, `gpu_after` |

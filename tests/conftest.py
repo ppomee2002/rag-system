@@ -123,6 +123,8 @@ class MockServer:
                 )
                 if server.kind == "vllm" and self.path == "/v1/chat/completions":
                     return self._vllm_chat(body)
+                if server.kind == "vllm" and self.path == "/reset_prefix_cache":
+                    return self._send(200, {})
                 if server.kind == "ollama" and self.path == "/api/chat":
                     server.n_chat += 1
                     prompt = body["messages"][-1]["content"]
