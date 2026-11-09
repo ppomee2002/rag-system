@@ -20,6 +20,7 @@ crag = [
     "faiss-cpu>=1.9",
     "datasets>=3.0",
     "matplotlib>=3.8",
+    "langgraph>=1.0,<2",   # crag_system: LangGraph CRAG (rag.graph)
 ]
 
 [dependency-groups]

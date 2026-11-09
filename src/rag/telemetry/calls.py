@@ -20,6 +20,7 @@ _KIND_PREFIXES = {
     "grade": prompts.GRADE.partition("{")[0],
     "rewrite": prompts.REWRITE.partition("{")[0],
     "generate": prompts.GENERATE.partition("{")[0],
+    "grade_batch": prompts.GRADE_BATCH.partition("{")[0],
 }
 
 
@@ -56,6 +57,7 @@ class CallRecord:
     server_prompt_eval: float | None = None
     server_eval: float | None = None
     error: str | None = None
+    dispatch_key: list | None = None  # SchedulingGate 가 dispatch 할 때의 정책 key
 
 
 class CallRecorder:
