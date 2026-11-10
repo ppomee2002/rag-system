@@ -55,6 +55,13 @@ def _ctx(config) -> RunContext:
     return config["configurable"]["ctx"]
 
 
+def _enter(ctx: RunContext, stage: str) -> None:
+    """QueryState 에 현재 stage 를 알린다 (Scheduler 정책 입력)."""
+    qs = ctx.query_state
+    if qs is not None and hasattr(qs, "enter_stage"):
+        qs.enter_stage(stage)
+
+
 class CRAGGraph:
     def __init__(
         self,
@@ -84,6 +91,7 @@ class CRAGGraph:
     # ------------------------------------------------------------------ nodes
     def _retrieve(self, state: CRAGState, config) -> dict:
         ctx = _ctx(config)
+        _enter(ctx, "retrieval")
         with ctx.timer.stage("retrieval"):
             docs = self.retriever.retrieve(state["question"], self.top_k)
         if ctx.query_state is not None:
@@ -92,6 +100,7 @@ class CRAGGraph:
 
     def _grade(self, state: CRAGState, config) -> dict:
         ctx = _ctx(config)
+        _enter(ctx, "grading")
         with ctx.timer.stage("grading"):
             result = self.grader.grade(
                 state["question"], state["docs"], ctx.grader_llm, self.upper, self.lower
@@ -111,12 +120,14 @@ class CRAGGraph:
 
     def _rewrite(self, state: CRAGState, config) -> dict:
         ctx = _ctx(config)
+        _enter(ctx, "rewrite")
         with ctx.timer.stage("rewrite"):
             query = ctx.llm.generate(prompts.REWRITE.format(question=state["question"]))
         return {"rewritten": query}
 
     def _web_search(self, state: CRAGState, config) -> dict:
         ctx = _ctx(config)
+        _enter(ctx, "web_search")
         with ctx.timer.stage("web_search"):
             web_docs = self.web_search.search(state["rewritten"].strip(), self.web_top_k)
         contexts = web_docs if state["action"] == "incorrect" else state["contexts"] + web_docs
@@ -124,6 +135,7 @@ class CRAGGraph:
 
     def _generate(self, state: CRAGState, config) -> dict:
         ctx = _ctx(config)
+        _enter(ctx, "generation")
         with ctx.timer.stage("generation"):
             answer = ctx.llm.generate(
                 prompts.GENERATE.format(
@@ -184,6 +196,7 @@ class CRAGGraph:
             extra={
                 "stage_counts": dict(ctx.timer.counts),
                 "retrieval_scores": [d.score for d in out["docs"]],
+                "retrieval_doc_ids": [d.id for d in out["docs"]],  # 조건 간 검색 결과 동일성 확인용
                 "grading": {
                     "strategy": self.grader.name,
                     "scores_full": g.scores,  # 검색 순서, None = 평가 안 함

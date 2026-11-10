@@ -142,11 +142,14 @@ mode 는 `sequential` / `live` / `trace_sim` 으로 결과에 반드시 표시�
 | 추론 엔진 | `rag.llm.engine`, `ollama_engine`, `vllm_engine`, `engine_llm`, `factory` | 기존 `LLM.generate()` 유지 |
 | LangGraph CRAG | `rag.graph.CRAGGraph` | 기존 `CRAG` 와 Full 동등성 테스트 (3분기 × 순차/병렬) |
 | Grading 전략 | `rag.grading` (`full`, `lazy_hit`, `lazy_rest`, `batch`, `adaptive`) | 같은 인터페이스 `grade(question, docs, llm, upper, lower)` |
-| Scheduler | `rag.scheduling` (`SchedulingGate`, `FCFS`, `FCFSQuery`, `SRPTEst`, `Aging`, `WaitThreshold`, `CostModel`, `LLMGate`) | K slots, 동적 우선순위, vLLM priority 전달 |
+| Scheduler | `rag.scheduling` (`SchedulingGate`, `FCFS`, `FCFSQuery`, `SJFPred`, `SRPTEst`, `Aging`, `WaitThreshold`, `CostModel`, `OOFCostModel`, `LLMGate`) | K slots, 동적 우선순위, vLLM priority 전달 |
+| 실행 상태 | `rag.scheduling.state` (`QueryState`, `PolicyView`) | stage / correction / 잔여 추정 / 누적 대기. 정책은 `PolicyView` 로 정책 입력만 읽음 |
+| 사전 검증 | `rag.scheduling.preflight` | priority 설정 일치, launch 기록 대조, 서버 probe, cost model 누수 검사 |
+| 비교 가능성 검사 | `experiments/crag_system/comparability.py` | run 간 질문·검색 결과·모델·replay 원본 일치, 교란 요인 기록 |
 | Web 기록/재생 | `rag.retrieval.web_cache` | 실제 Tavily 기록 → 같은 문서로 지연 recorded / zero 재생 |
 | Runner | `experiments/crag_system/runner.py`, `run.py` | sequential / live, 결과 `queries.jsonl`, `calls.jsonl`, `run_meta.json` 외 |
 | Workload | `workload.py`, `make_workload.py` | 요청 순서·도착 시각 + sha256, 덮어쓰기 금지 |
-| Cost model 학습 | `fit_cost_model.py` | sequential run trace → SRPT-est 모델 json |
+| Cost model 학습 | `fit_cost_model.py` | sequential run trace → 모델 json (학습 질문 목록 포함, `--oof K`) |
 
 테스트 (`uv run pytest`) 는 실제 시스템 코드의 기능 검증용이다. mock / 가짜 엔진 결과를 정확도·성능 결과로 쓰지 않는다.
 
@@ -162,24 +165,49 @@ uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1b --set
 uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-1c \
   --overlay experiments/crag_system/configs/engine_ollama.yaml
 
-# SYS-2: grading 전략 (sequential)
-for s in full lazy_hit batch adaptive; do
-  uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-2a --set grading.strategy=$s
+# SYS-2: grading 전략 (sequential). Full 은 실제 Tavily 를 기록하고, 나머지는 그 기록을 replay
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-2a --set grading.strategy=full
+FULL=results/crag_system/SYS-2a/<full run>
+for s in lazy_hit batch adaptive; do
+  uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-2a \
+    --set grading.strategy=$s --set crag.web_search.provider=replay \
+    --set "crag.web_search.replay_from_runs=['$FULL']" --set crag.web_search.latency_mode=recorded
 done
+uv run python experiments/crag_system/comparability.py $FULL results/crag_system/SYS-2a/<other runs>
 
-# SYS-3 / SYS-4: 동시 요청 (live)
-uv run python experiments/crag_system/fit_cost_model.py results/crag_system/SYS-2a/<full run> \
-  --service-key wall --out results/crag_system/cost_models/full_wall.json
-uv run python experiments/crag_system/make_workload.py --name rho0.8_s0 --n 500 --rho 0.8 \
-  --capacity-rps <측정값> --seed 0
-uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3a \
-  --workload results/crag_system/workloads/rho0.8_s0.json \
-  --set run.mode=live --set scheduler.policy=srpt_est --set scheduler.slots=4 \
-  --set scheduler.aging_alpha=0.5 \
-  --set "scheduler.cost_model={path: results/crag_system/cost_models/full_wall.json}"
+# SYS-3 / SYS-4: 동시 요청 (live). cost model 학습 질문과 평가 질문 분리
+uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3-train \
+  --set dataset.split.part=train                               # cost model 학습용 trace
+uv run python experiments/crag_system/fit_cost_model.py results/crag_system/SYS-3-train/<run> \
+  --service-key wall --out results/crag_system/cost_models/train_wall.json
+uv run python experiments/crag_system/make_workload.py --name eval_rho0.8_s0 --n 500 --rho 0.8 \
+  --capacity-rps <측정값> --seed 0 --set dataset.split.part=eval
+for pol in fcfs sjf_pred srpt_est; do
+  uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3a \
+    --workload results/crag_system/workloads/eval_rho0.8_s0.json --set dataset.split.part=eval \
+    --set run.mode=live --set scheduler.policy=$pol --set scheduler.slots=4 \
+    --set "scheduler.cost_model={path: results/crag_system/cost_models/train_wall.json}"
+done
+# vLLM priority 까지 쓰는 조건: 서버를 SCHED_POLICY=priority 로 띄우고 세 설정을 함께
+#   --set scheduler.engine_priority=key --set llm.send_priority=true \
+#   --set llm.server_scheduling_policy=priority --set llm.launch_meta=~/crag_logs/vllm_<ts>_launch.json \
+#   --set run.probe_server_policy=true
 ```
 
-조건 비교 시 같은 workload 파일, 같은 vLLM launch 설정, 같은 GPU 할당을 쓰고 `run_meta.json` 으로 확인한다.
+조건 비교 시 같은 workload 파일, 같은 vLLM launch 설정, 같은 GPU 할당을 쓰고 `comparability.py` 와
+`run_meta.json` (`preflight`, `comparability`) 으로 확인한다. 같은 세션에서 조건을 번갈아 돌릴 때는
+`--set "run.session={id: s1, order_index: 0}"` 처럼 실행 순서를 기록한다.
+
+## 논문 타당성 관련 구현 (2026-11-10)
+
+| 항목 | 구현 | 오류로 막는 경우 |
+|---|---|---|
+| 정적 SJF | `SJFPred`: 요청의 첫 호출 때 `pred_total` 을 예측해 요청 끝까지 고정 (request 단위) | cost model 없음 |
+| 상태 갱신형 SRPT-est | `SRPTEst`: 호출마다 현재 stage 기준 남은 작업량. 추정치는 `QueryState.est_history` 에 기록 | cost model 없음 |
+| 실행 상태 | `QueryState`: stage (`arrived → retrieval → grading → decided → [rewrite → web_search] → generation → done`), corrected, n_graded, cum_wait (정책 입력) / action, est_history, stage_history, retrieval_doc_ids (기록 전용) | 정책이 기록 전용 필드 접근 시 AttributeError |
+| priority 일치 | `check_priority_config`, `check_launch_meta`, `probe_server_priority` | engine_priority=key ↔ send_priority 불일치, 서버 선언이 priority 가 아님, launch 인자·모델 불일치, 서버가 priority 거부 |
+| cost model 누수 | 모델에 `train_query_ids` 저장, `check_cost_model_leakage`, `OOFCostModel`, `dataset.split` | 학습·평가 질문 중복 (OOF 아니고 `allow_cost_model_overlap` 아님), 학습 질문 목록 없는 모델 |
+| 공정 비교 | `retrieval_doc_ids` 기록, `replay_from_runs`, run_meta `comparability` (질문 hash, 설정, replay 원본 sha256, prefix cache·session), run_end `prefix_cache_delta`, `comparability.py` | (검사 스크립트가 critical 차이 보고, exit 1) |
 
 ## Correction-aware: SRPT-est 와의 차이 (구현 보류, 정의 확정 후 구현)
 
@@ -191,7 +219,8 @@ uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3a \
     (GPU 를 쓰지 않는 외부 지연) 를 빨리 시작해 다른 query 의 GPU 작업과 겹치게 한다.
   - CA-2 slowdown-aware: 경과시간 대비 남은 작업량으로 우선순위.
   - CA-3 class slack: correction / 비correction 별 목표 지연 대비 여유.
-- 구현 위치: `rag.scheduling.policies` 에 Policy 하나 추가 (QueryState.action / corrected 를 이미 제공).
+- 구현 위치: `rag.scheduling.policies` 에 Policy 하나 추가. 정책 입력 `PolicyView.stage`,
+  `PolicyView.corrected` 가 이미 제공된다 (현재 SRPT-est / SJF 는 corrected 를 쓰지 않음).
   `build_policy({"policy": "correction_aware"})` 는 지금은 NotImplementedError.
 
 ## 실제 GPU 에서 검증해야 하는 것
@@ -204,6 +233,9 @@ uv run python experiments/crag_system/run.py --config $CFG --exp-id SYS-3a \
 | Llama 3.1 이 batch grading JSON 을 지키는 비율 | 모델 출력 | SYS-2 `extra.grading.info.batch_status`, fallback 수 |
 | 같은 prompt 의 결정성 (temperature 0, batching) | continuous batching 비결정성 | probe determinism, 같은 조건 반복 run 의 답 일치율 |
 | K 별 처리량, μ_max (ρ 기준) | 하드웨어 의존 | probe sweep, 포화 부하 live run |
-| cost model 예측 정확도 (wall 기반) | vLLM 은 요청 단위 서버 시간 없음 | SYS-2 trace 로 OOF 오차 확인 |
+| cost model 예측 정확도 (wall 기반) | vLLM 은 요청 단위 서버 시간 없음. 부하 시 batching 으로 서비스 시간이 달라짐 | train split trace 로 학습 → eval split 에서 예측 오차 확인 |
+| FCFS 서버가 priority 요청을 거부하는지 | 버전마다 다름 (수락하면 probe 로 정책 판별 불가) | probe priority, `run.probe_server_policy` 결과 |
+| vLLM priority 가 효과를 내는 K | K 가 서버 동시 처리 한도보다 작으면 vLLM 대기열이 비어 priority 무의미 | probe priority_order, K sweep |
+| prefix cache 교란 크기 | 조건 순서에 따라 latency 가 달라질 수 있음 | `run_end.prefix_cache_delta`, ABBA 순서 비교 |
 | Adaptive 임계값 | 데이터 기반 튜닝 필요 | dev split 에서 튜닝 후 고정 |
 | 다른 사용자 GPU 간섭 | 공유 서버 | `run_meta.json` / `run_end.json` 의 `gpu`, `gpu_after` |

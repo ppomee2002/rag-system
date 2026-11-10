@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import threading
@@ -35,8 +36,19 @@ from rag.llm.engine_llm import EngineLLM
 from rag.llm.factory import build_engine
 from rag.pipelines.crag import CRAG
 from rag.pipelines.vanilla import VanillaRAG
-from rag.scheduling import CostModel, QueryState, SchedulingGate, build_policy
-from rag.scheduling.cost_model import fit_cost_model, job_from_row
+from rag.scheduling import QueryState, SchedulingGate, build_policy
+from rag.scheduling.cost_model import (
+    cost_model_from_dict,
+    fit_cost_model,
+    fit_oof_cost_model,
+    job_from_row,
+)
+from rag.scheduling.preflight import (
+    check_cost_model_leakage,
+    check_launch_meta,
+    check_priority_config,
+    probe_server_priority,
+)
 from rag.telemetry.calls import CallRecorder
 from rag.telemetry.run_meta import (
     JsonlWriter,
@@ -104,7 +116,7 @@ class Components:
     web_search: Any
     engine: Any
     grader_engine: Any = None
-    cost_model: CostModel | None = None
+    cost_model: Any = None  # CostModel | OOFCostModel
     closers: list = field(default_factory=list)
 
 
@@ -119,6 +131,25 @@ def load_examples(cfg: dict) -> list[QAExample]:
 def split_warmup(cfg: dict, examples: list[QAExample]) -> tuple[list, list]:
     n = cfg.get("run", {}).get("warmup_queries", 0) or 0
     return examples[:n], examples[n:]
+
+
+def apply_split(cfg: dict, pool: list[QAExample]) -> list[QAExample]:
+    """dataset.split: {part: train | eval | all, train_frac, seed}
+
+    cost model 학습용 (train) 과 스케줄링 평가용 (eval) 질문을 분리한다.
+    같은 설정이면 항상 같은 분할.
+    """
+    sp = (cfg.get("dataset") or {}).get("split") or {}
+    part = sp.get("part", "all")
+    if part == "all":
+        return pool
+    if part not in ("train", "eval"):
+        raise ValueError("dataset.split.part: train | eval | all")
+    ids = sorted(ex.id for ex in pool)
+    random.Random(sp.get("seed", 0)).shuffle(ids)
+    n_train = int(round(len(ids) * sp.get("train_frac", 0.3)))
+    chosen = set(ids[:n_train] if part == "train" else ids[n_train:])
+    return [ex for ex in pool if ex.id in chosen]
 
 
 def load_trace(run_dir: str | Path) -> list[dict]:
@@ -137,17 +168,32 @@ def load_trace(run_dir: str | Path) -> list[dict]:
     return rows
 
 
-def load_cost_model(spec: dict | None) -> CostModel | None:
-    """scheduler.cost_model: {path: model.json} 또는 {trace: <sequential run 폴더>, service_key}."""
+def load_cost_model(spec: dict | None):
+    """scheduler.cost_model:
+    {path: model.json}  또는  {trace: <sequential run 폴더>, service_key: wall, oof_folds: null|k}
+    """
     if not spec:
         return None
     if spec.get("path"):
-        return CostModel.from_dict(json.loads(Path(spec["path"]).read_text(encoding="utf-8")))
+        return cost_model_from_dict(json.loads(Path(spec["path"]).read_text(encoding="utf-8")))
     rows = load_trace(spec["trace"])
     jobs = [job_from_row(r, spec.get("service_key", "wall")) for r in rows]
-    model = fit_cost_model(jobs)
+    k = spec.get("oof_folds")
+    model = fit_oof_cost_model(jobs, k, spec.get("oof_seed", 0)) if k else fit_cost_model(jobs)
     model.meta.update(trace=str(spec["trace"]), service_key=spec.get("service_key", "wall"))
     return model
+
+
+def replay_sources(wcfg: dict) -> list[Path]:
+    """replay_paths + replay_from_runs (각 run 폴더의 web_cache.jsonl)."""
+    paths = [Path(p) for p in wcfg.get("replay_paths") or []]
+    paths += [Path(r) / "web_cache.jsonl" for r in wcfg.get("replay_from_runs") or []]
+    if not paths:
+        raise ValueError("provider=replay 에는 replay_paths 또는 replay_from_runs 가 필요")
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"web replay 기록이 없음: {missing}")
+    return paths
 
 
 def build_web_search(cfg: dict, run_dir: Path):
@@ -169,7 +215,7 @@ def build_web_search(cfg: dict, run_dir: Path):
         if fallback is not None and wcfg.get("record"):
             fallback = RecordingWebSearch(fallback, run_dir / "web_cache.jsonl")
         return ReplayWebSearch(
-            wcfg["replay_paths"], wcfg.get("latency_mode", "recorded"), fallback=fallback
+            replay_sources(wcfg), wcfg.get("latency_mode", "recorded"), fallback=fallback
         )
     raise ValueError(f"지원하지 않는 web_search provider: {provider}")
 
@@ -202,6 +248,13 @@ def build_components(cfg: dict, run_dir: Path) -> Components:
 
 
 # ---------------------------------------------------------------- runner
+def metric_delta(before, after, needle: str) -> dict | None:
+    """vLLM /metrics 에서 이름에 needle 이 들어간 counter 의 변화량 (예: prefix cache hit)."""
+    if not isinstance(before, dict) or not isinstance(after, dict) or "error" in after:
+        return None
+    return {k: after[k] - before.get(k, 0.0) for k in after if needle in k}
+
+
 def _percentiles(x) -> dict:
     if len(x) == 0:
         return {"n": 0}
@@ -271,12 +324,23 @@ class Runner:
             )
         self.examples = load_examples(cfg)
         self.warmup, pool = split_warmup(cfg, self.examples)
+        pool = apply_split(cfg, pool)
         self.by_id = {ex.id: ex for ex in self.examples}
         self.workload = workload
         self.requests = self._requests(pool)
+        sched = cfg.get("scheduler") or {}
+        self.preflight: dict = {"priority": check_priority_config(sched, cfg["llm"])}
+        if cfg["llm"].get("launch_meta"):
+            self.preflight["launch_meta"] = check_launch_meta(cfg["llm"]["launch_meta"], cfg["llm"])
         cost_model = components.cost_model if components else None
         if cost_model is None:
-            cost_model = load_cost_model((cfg.get("scheduler") or {}).get("cost_model"))
+            cost_model = load_cost_model(sched.get("cost_model"))
+        if sched.get("policy", "none") not in (None, "none"):
+            self.preflight["cost_model_leakage"] = check_cost_model_leakage(
+                cost_model,
+                {r["query_id"] for r in self.requests},
+                allow_overlap=bool(sched.get("allow_cost_model_overlap", False)),
+            )
         self.gate = self._build_gate(cost_model)
 
         exp_id = cfg.get("exp_id", "SYS-dev")
@@ -342,11 +406,13 @@ class Runner:
             ex.id,
             arrival=arrival if arrival is not None else t_start,
             s_pop=ex.metadata.get("s_pop"),
+            t0=t0,
+            request_key=f"{req['i']}:{ex.id}",
         )
         rec = CallRecorder(t0)
-        kw = {"recorder": rec}
+        kw = {"recorder": rec, "query_state": q}
         if self.gate is not None:
-            kw.update(scheduler=self.gate, query_state=q)
+            kw["scheduler"] = self.gate
         llm = EngineLLM(self.comp.engine, **kw)
         grader_llm = EngineLLM(self.comp.grader_engine, **kw) if self.comp.grader_engine else llm
         row: dict = {
@@ -365,8 +431,10 @@ class Runner:
             d["contexts"] = [c["id"] for c in d["contexts"]]
             row.update(d)
             row.update(score_all(res.answer, ex.answers))
+            q.finish(res.corrective_action)
         except Exception as e:  # 기록하고 계속
             row["error"] = f"{type(e).__name__}: {e}"[:1000]
+            q.finish()
         finish = time.perf_counter() - t0
         row.update(
             finish=finish,
@@ -374,11 +442,8 @@ class Runner:
             gold_answers=ex.answers,
             s_pop=ex.metadata.get("s_pop"),
             retrieval_chars=q.retrieval_chars,
-            query_state={
-                "cum_wait": q.cum_wait,
-                "n_dispatched": q.n_dispatched,
-                "action": q.action,
-            },
+            retrieval_doc_ids=q.retrieval_doc_ids,
+            query_state=q.snapshot(),
             calls_summary=rec.summary(),
         )
         for c in rec.to_dicts():
@@ -408,6 +473,35 @@ class Runner:
         ).run(ex)
 
     # ------------------------------------------------------------ run
+    def _comparability_record(self) -> dict:
+        """조건 간 비교에서 같아야 하는 값과 교란 요인 (캐시, 실행 순서) 기록."""
+        cfg = self.cfg
+        wcfg = (cfg.get("crag") or {}).get("web_search") or {}
+        sources = []
+        if wcfg.get("provider") == "replay":
+            for pth in replay_sources(wcfg):
+                digest = hashlib.sha256(pth.read_bytes()).hexdigest()
+                sources.append({"path": str(pth), "sha256": digest})
+        ids = [r["query_id"] for r in self.requests]
+        return {
+            "eval_query_ids_sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
+            "n_eval_queries": len(set(ids)),
+            "warmup_query_ids": [ex.id for ex in self.warmup],
+            "dataset": cfg.get("dataset"),
+            "retriever": cfg.get("retriever"),
+            "embedding": cfg.get("embedding"),
+            "llm": {k: v for k, v in cfg["llm"].items() if k != "api_key_env"},
+            "thresholds": {"upper": self.upper, "lower": self.lower},
+            "web_search": {
+                "provider": wcfg.get("provider"),
+                "latency_mode": wcfg.get("latency_mode"),
+                "record": wcfg.get("record"),
+                "sources": sources,
+            },
+            "prefix_cache_reset_requested": bool(cfg.get("run", {}).get("reset_prefix_cache")),
+            "session": cfg.get("run", {}).get("session"),  # {id, order_index}: 조건 실행 순서
+        }
+
     def _engine_metrics(self):
         fn = getattr(self.comp.engine, "metrics_text", None)
         if fn is None:
@@ -438,7 +532,21 @@ class Runner:
             },
             "n_warmup": len(self.warmup),
             "n_requests": len(self.requests),
+            "preflight": self.preflight,
+            "comparability": self._comparability_record(),
         }
+        if self.cfg.get("run", {}).get("probe_server_policy"):
+            try:
+                self.preflight["server_probe"] = probe_server_priority(
+                    self.comp.engine, self.cfg["llm"].get("server_scheduling_policy")
+                )
+            except Exception as e:
+                failed = {"error": str(e), "preflight": self.preflight}
+                write_new(
+                    self.run_dir / "preflight_failed.json",
+                    json.dumps(failed, indent=2, default=str),
+                )
+                raise
         write_run_files(self.run_dir, self.cfg, collect_run_metadata(self.cfg, engines, extra))
         prefix_reset = None
         if self.cfg.get("run", {}).get("reset_prefix_cache"):
@@ -462,7 +570,8 @@ class Runner:
             "prefix_cache_reset": prefix_reset,
             "gpu_after": gpu_snapshot(),
             "engine_metrics_before": metrics_before,
-            "engine_metrics_after": self._engine_metrics(),
+            "engine_metrics_after": (metrics_after := self._engine_metrics()),
+            "prefix_cache_delta": metric_delta(metrics_before, metrics_after, "prefix_cache"),
             "scheduler": None
             if self.gate is None
             else {"max_waiting": self.gate.max_waiting, "dispatches": len(self.gate.log)},

@@ -13,6 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from crag_fixtures import setup  # noqa: F401  (runner fixture 등록)
 
 
 def default_responder(prompt: str) -> str:

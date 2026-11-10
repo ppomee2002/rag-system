@@ -4,8 +4,9 @@
         --service-key wall --out results/crag_system/cost_models/<name>.json
 
 service_key: vLLM trace 는 wall (부하 없는 sequential run 의 호출 시간), Ollama 는 server_total.
-스케줄링 평가에 쓰는 workload 의 query 로 학습하면 예측이 낙관적이 되므로, 가능하면 다른 query 의
-trace 로 학습하거나 OOF 로 비교한다 (rag.scheduling.cost_model.attach_oof_predictions).
+학습한 질문 목록 (train_query_ids) 이 모델에 저장되고, runner 가 평가 workload 와 겹치면 거부한다.
+  - 독립 학습: trace 를 dataset.split.part=train 으로 만들고 평가는 part=eval
+  - OOF      : --oof 5 (평가 질문이 trace 에 있어도 자기 fold 를 뺀 모델로 예측)
 """
 
 import argparse
@@ -21,14 +22,28 @@ def main(argv=None) -> Path:
     ap = argparse.ArgumentParser()
     ap.add_argument("trace")
     ap.add_argument("--service-key", default="wall")
+    ap.add_argument(
+        "--oof",
+        type=int,
+        default=None,
+        metavar="K",
+        help="K-fold OOF 모델 (평가 질문이 trace 에 포함될 때)",
+    )
+    ap.add_argument("--oof-seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    model = load_cost_model({"trace": a.trace, "service_key": a.service_key})
+    model = load_cost_model(
+        {"trace": a.trace, "service_key": a.service_key, "oof_folds": a.oof, "oof_seed": a.oof_seed}
+    )
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "x", encoding="utf-8") as f:
         json.dump(model.to_dict(), f, indent=2)
-    print(f"saved -> {out} (n_jobs={model.meta['n_jobs']})")
+    print(
+        f"saved -> {out} (n_jobs={model.meta['n_jobs']}, "
+        f"train_queries={len(model.train_query_ids or [])}, "
+        f"type={model.meta.get('type', 'single')})"
+    )
     return out
 
 

@@ -119,6 +119,14 @@ class CostModel:
             return float(self.gen_coef @ [1.0, chars])
         return self.rewrite_mean
 
+    def for_query(self, query_id: str) -> CostModel:
+        """OOFCostModel 과 같은 인터페이스. 단일 모델은 자기 자신."""
+        return self
+
+    @property
+    def train_query_ids(self) -> list[str] | None:
+        return self.meta.get("train_query_ids")
+
     def pred_total(self, feats) -> float:
         return float(feats @ self.total_beta)
 
@@ -214,7 +222,7 @@ def fit_cost_model(jobs: list[Job]) -> CostModel:
         total_beta=_lstsq(F, np.array([j.work for j in jobs])),
         post_beta=_lstsq(F, np.array([post_work(j) for j in jobs])),
         grade_batch_coef=batch_coef,
-        meta={"n_jobs": len(jobs)},
+        meta={"n_jobs": len(jobs), "train_query_ids": sorted({j.qid for j in jobs})},
     )
 
 
@@ -227,3 +235,71 @@ def attach_oof_predictions(jobs: list[Job], k: int = 5, seed: int = 0) -> None:
         for i in test:
             jobs[i].pred_total = model.pred_total(jobs[i].feats)
             jobs[i].pred_post = model.pred_post(jobs[i].feats)
+
+
+class OOFCostModel:
+    """Out-of-fold cost model: trace 에 있는 query 는 자기 fold 를 빼고 학습한 모델로 예측한다.
+
+    - 평가 workload 의 query 가 학습 trace 에 들어 있어도, 그 query 의 실제 실행시간은 그 query 의
+      예측에 쓰이지 않는다 (fold 단위로 제외).
+    - trace 에 없는 query (독립 평가 질문) 는 전체 trace 로 학습한 모델을 쓴다.
+    """
+
+    def __init__(
+        self,
+        full: CostModel,
+        folds: list[CostModel],
+        fold_of: dict[str, int],
+        meta: dict | None = None,
+    ):
+        self.full = full
+        self.folds = folds
+        self.fold_of = fold_of
+        self.meta = {
+            "type": "oof",
+            "k": len(folds),
+            "n_jobs": full.meta.get("n_jobs"),
+            "train_query_ids": full.train_query_ids,
+            **(meta or {}),
+        }
+
+    def for_query(self, query_id: str) -> CostModel:
+        i = self.fold_of.get(query_id)
+        return self.full if i is None else self.folds[i]
+
+    @property
+    def train_query_ids(self) -> list[str] | None:
+        return self.full.train_query_ids
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "oof",
+            "full": self.full.to_dict(),
+            "folds": [m.to_dict() for m in self.folds],
+            "fold_of": self.fold_of,
+            "meta": {k: v for k, v in self.meta.items() if k not in ("type",)},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> OOFCostModel:
+        return cls(
+            CostModel.from_dict(d["full"]),
+            [CostModel.from_dict(m) for m in d["folds"]],
+            d["fold_of"],
+            d.get("meta"),
+        )
+
+
+def fit_oof_cost_model(jobs: list[Job], k: int = 5, seed: int = 0) -> OOFCostModel:
+    """query 단위로 k 개 fold 를 나눠 fold 별 모델 (그 fold 제외 학습) 을 만든다."""
+    qids = sorted({j.qid for j in jobs})
+    if len(qids) < k:
+        raise ValueError(f"OOF 에는 query 가 fold 수 ({k}) 이상 필요")
+    perm = np.random.default_rng(seed).permutation(len(qids))
+    fold_of = {qids[i]: int(n % k) for n, i in enumerate(perm)}
+    folds = [fit_cost_model([j for j in jobs if fold_of[j.qid] != f]) for f in range(k)]
+    return OOFCostModel(fit_cost_model(jobs), folds, fold_of, {"seed": seed})
+
+
+def cost_model_from_dict(d: dict) -> CostModel | OOFCostModel:
+    return OOFCostModel.from_dict(d) if d.get("type") == "oof" else CostModel.from_dict(d)

@@ -2,142 +2,23 @@
 
 import json
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
-import yaml
 
-from rag.llm.engine import LLMResponse
 from rag.retrieval.web_cache import RecordingWebSearch, ReplayWebSearch
-from rag.telemetry.calls import infer_call_kind
-from rag.types import Document
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "crag_system"))
 import make_workload  # noqa: E402
 import run as run_cli  # noqa: E402
+from crag_fixtures import ROOT, Web, pool_ids, read_jsonl  # noqa: E402
 from runner import (  # noqa: E402
-    Components,
     Runner,
-    load_examples,
     load_layered_config,
     load_trace,
-    split_warmup,
 )
 from workload import load_workload, resolve_rate  # noqa: E402
 from workload import make_workload as make_wl
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-class FakeEngine:
-    """query 번호가 짝수면 relevant (correct), 홀수면 incorrect 로 응답하는 in-process 엔진."""
-
-    name, model = "fake", "fake-model"
-
-    def __init__(self, delay=0.002, batch_reply=None):
-        self.delay = delay
-        self.batch_reply = batch_reply
-        self.active = self.max_active = 0
-        self.lock = threading.Lock()
-        self.priorities = []
-
-    def complete(self, request):
-        with self.lock:
-            self.active += 1
-            self.max_active = max(self.max_active, self.active)
-            self.priorities.append(request.priority)
-        t0 = time.perf_counter()
-        time.sleep(self.delay)
-        kind = request.kind if request.kind != "other" else infer_call_kind(request.prompt)
-        good = "Question: q0" in request.prompt or "even" in request.prompt
-        if kind == "grade":
-            text = "0.9" if good else "0.1"
-        elif kind == "grade_batch":
-            text = self.batch_reply or (
-                '{"scores": [0.9, 0.1, 0.1]}' if good else '{"scores": [0.1, 0.1, 0.1]}'
-            )
-        elif kind == "rewrite":
-            text = "rewritten"
-        else:
-            text = "ans"
-        with self.lock:
-            self.active -= 1
-        return LLMResponse(
-            text,
-            "fake",
-            model="fake-model",
-            t_start=t0,
-            t_end=time.perf_counter(),
-            prompt_tokens=len(request.prompt) // 4,
-            completion_tokens=2,
-        )
-
-    def describe(self):
-        return {"engine": "fake"}
-
-
-class Retriever:
-    def retrieve(self, query, top_k):
-        tag = "even" if query.endswith(("0?", "2?", "4?", "6?", "8?")) else "odd"
-        return [
-            Document(id=f"{tag}{i}", text=f"{tag} doc {i}", score=0.8 - 0.1 * i)
-            for i in range(top_k)
-        ]
-
-
-class Web:
-    def __init__(self):
-        self.n = 0
-
-    def search(self, query, top_k):
-        self.n += 1
-        return [Document(id=f"w{i}", text=f"web {i}") for i in range(top_k)]
-
-
-@pytest.fixture
-def setup(tmp_path):
-    data = tmp_path / "qa.jsonl"
-    data.write_text(
-        "".join(
-            json.dumps(
-                {"id": f"id{i}", "question": f"Question {i}?", "answers": ["ans"], "s_pop": 10 * i}
-            )
-            + "\n"
-            for i in range(12)
-        ),
-        encoding="utf-8",
-    )
-    overlay = tmp_path / "overlay.yaml"
-    overlay.write_text(
-        yaml.safe_dump(
-            {
-                "output_dir": str(tmp_path / "results"),
-                "dataset": {"path": str(data), "limit": None},
-                "retriever": {"top_k": 3},
-                "crag": {"web_search": {"top_k": 2}},
-                "run": {"warmup_queries": 2},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    def make(sets=(), engine=None, web=None):
-        cfg = load_layered_config(ROOT / "experiments/crag_system/config.yaml", [overlay], sets)
-        comp = Components(Retriever(), web or Web(), engine or FakeEngine())
-        return cfg, comp
-
-    return tmp_path, make
-
-
-def pool_ids(cfg):
-    warm, pool = split_warmup(cfg, load_examples(cfg))
-    return [ex.id for ex in warm], [ex.id for ex in pool]
-
-
-def read_jsonl(p):
-    return [json.loads(x) for x in Path(p).read_text(encoding="utf-8").splitlines()]
 
 
 def test_layered_config_and_set():
@@ -284,13 +165,19 @@ def test_srpt_from_sequential_trace_and_engine_priority(setup):
             "scheduler.policy=srpt_est",
             "scheduler.slots=1",
             "scheduler.engine_priority=key",
-            f"scheduler.cost_model={{trace: '{seq_dir.as_posix()}', service_key: wall}}",
+            "llm.send_priority=true",
+            "llm.server_scheduling_policy=priority",
+            # 같은 질문의 trace 로 학습하므로 OOF 필요 (아니면 누수 검사에서 거부)
+            f"scheduler.cost_model={{trace: '{seq_dir.as_posix()}', service_key: wall, "
+            "oof_folds: 5}",
         ]
     )
     wl = make_wl(pool_ids(cfg)[1], 10, seed=1, rate=300.0)
     run_dir = Runner(cfg, comp, workload=wl, run_id="srpt").run()
     meta = json.loads((run_dir / "run_meta.json").read_text(encoding="utf-8"))
-    assert meta["cost_model"]["n_jobs"] == 10
+    assert meta["cost_model"]["type"] == "oof"
+    assert meta["preflight"]["cost_model_leakage"]["status"] == "oof"
+    assert meta["preflight"]["priority"]["send_priority"] is True
     assert meta["scheduler"]["policy"]["name"] == "srpt_est"
     assert all(isinstance(p, int) for p in comp.engine.priorities)
 

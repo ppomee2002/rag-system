@@ -67,6 +67,8 @@ class SchedulingGate:
         with self._cv:
             t = CallTicket(query, kind, idx, prompt_chars, self.clock(), next(self._seq))
             t.base = self.policy.base(t)
+            if self.policy.base_is_estimate:
+                query.record_estimate(kind, idx, t.base)
             self._waiting.append(t)
             self.max_waiting = max(self.max_waiting, len(self._waiting))
             self._dispatch()
@@ -89,9 +91,9 @@ class SchedulingGate:
             t.key_at_grant = keys[i]
             t.t_grant = now
             wait = now - t.t_enqueue
-            with t.query.lock:
-                t.query.cum_wait += wait
-                t.query.n_dispatched += 1
+            with t.state.lock:
+                t.state.cum_wait += wait
+                t.state.n_dispatched += 1
             if self.engine_priority == "key":
                 t.engine_priority = key_to_engine_priority(keys[i])
             t.granted = True
@@ -100,7 +102,9 @@ class SchedulingGate:
                 self.log.append(
                     {
                         "t": now,
-                        "query_id": t.query.query_id,
+                        "query_id": t.state.query_id,
+                        "request_key": t.state.request_key,
+                        "stage": t.state.stage,
                         "kind": t.kind,
                         "idx": t.idx,
                         "seq": t.seq,

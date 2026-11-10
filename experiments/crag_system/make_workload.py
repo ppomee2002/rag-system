@@ -6,7 +6,8 @@
     # 순서만 (sequential 실험에서 query 순서 고정)
     uv run python experiments/crag_system/make_workload.py --name seq_seed0 --arrival sequential
 
-query pool 은 runner 와 같은 규칙 (seed shuffle + limit, 앞 warmup_queries 개 제외) 으로 만든다.
+query pool 은 runner 와 같은 규칙 (seed shuffle + limit, 앞 warmup_queries 개 제외,
+dataset.split) 으로 만든다. 스케줄링 평가용은 --set dataset.split.part=eval.
 결과: results/crag_system/workloads/<name>.json (이미 있으면 실패)
 """
 
@@ -15,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runner import load_examples, load_layered_config, split_warmup  # noqa: E402
+from runner import apply_split, load_examples, load_layered_config, split_warmup  # noqa: E402
 from workload import make_workload, save_workload  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,7 @@ def main(argv=None) -> Path:
     a = ap.parse_args(argv)
     cfg = load_layered_config(a.config, a.overlay, a.set)
     _, pool = split_warmup(cfg, load_examples(cfg))
+    pool = apply_split(cfg, pool)  # dataset.split.part=eval 이면 평가 질문만
     wl = make_workload(
         [ex.id for ex in pool],
         n_requests=a.n,
@@ -55,6 +57,7 @@ def main(argv=None) -> Path:
         "dataset": cfg["dataset"],
         "seed": cfg["seed"],
         "warmup_queries": cfg.get("run", {}).get("warmup_queries", 0),
+        "split": (cfg.get("dataset") or {}).get("split"),
     }
     path = save_workload(wl, Path(a.out_dir) / f"{a.name}.json")
     print(f"saved -> {path} ({len(wl['requests'])} requests, sha256 {wl['sha256'][:12]})")

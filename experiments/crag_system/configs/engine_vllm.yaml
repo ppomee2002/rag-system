@@ -11,5 +11,7 @@ llm:
   max_tokens: 512
   seed: 0
   stream: true                              # TTFT 측정
-  send_priority: false                      # SYS-3 priority 모드에서만 true (launch 가 --scheduling-policy priority 일 때)
+  send_priority: false                      # scheduler.engine_priority=key 와 같이 켜고 끔
+  server_scheduling_policy: fcfs            # launch 의 --scheduling-policy 와 일치해야 함
+  launch_meta: null                         # launch_vllm.sh 기록 경로 (있으면 대조)
   timeout: 600

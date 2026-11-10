@@ -42,7 +42,7 @@ class EngineLLM:
         gate: Gate | None = None,
         kind_fn: Callable[[str], str] = infer_call_kind,
         scheduler=None,  # rag.scheduling.SchedulingGate
-        query_state=None,  # rag.scheduling.QueryState (scheduler 사용 시 필수)
+        query_state=None,  # rag.scheduling.QueryState (scheduler 사용 시 필수, 없어도 stage 기록용)
     ):
         if scheduler is not None and query_state is None:
             raise ValueError("scheduler 를 쓰려면 query_state 가 필요")
@@ -60,6 +60,8 @@ class EngineLLM:
     def generate(self, prompt: str, **kwargs) -> str:
         kind = kwargs.get("kind") or self.kind_fn(prompt)
         idx = self.recorder.next_idx(kind) if self.recorder else 0
+        if self.query_state is not None and hasattr(self.query_state, "note_call"):
+            self.query_state.note_call(kind)  # 호출 종류로 stage 보정 (그래프 없는 파이프라인)
         t_enqueue = time.perf_counter()
         ticket = None
         priority = None
