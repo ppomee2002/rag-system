@@ -14,7 +14,7 @@ from compare_quality import _grade_format, compare_quality
 from crag_fixtures import FakeEngine, Retriever, Web
 from runner import Components, Runner
 
-SEPARATORS = "  \x85\x1c\x1d\x1e\x0b\x0c"
+SEPARATORS = "\u2028\u2029\x85\x1c\x1d\x1e\x0b\x0c"
 
 
 class SeparatorEngine(FakeEngine):
@@ -34,7 +34,7 @@ def two_runs(setup):
         cfg, _ = make(["exp_id=PRE-Q", "run.purpose=pre", "run.record_texts=true"])
         out.append(Runner(cfg, Components(Retriever(), Web(), SeparatorEngine()), run_id=rid).run())
     raw = (out[0] / "queries.jsonl").read_text(encoding="utf-8")
-    assert " " in raw and len(raw.splitlines()) > raw.count("\n")  # 이전 구현이 깨지던 조건
+    assert "\u2028" in raw and len(raw.splitlines()) > raw.count("\n")  # 이전 구현이 깨지던 조건
     return out
 
 

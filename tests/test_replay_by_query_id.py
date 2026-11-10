@@ -27,7 +27,9 @@ class QueryWeb:
     def search(self, query, top_k):
         self.n += 1
         tag = re.sub(r"\W+", "_", query)[:40]
-        return [Document(id=f"w:{tag}:{i}", text=f"web {i}   for {query}") for i in range(top_k)]
+        return [
+            Document(id=f"w:{tag}:{i}", text=f"web {i} \u2028 for {query}") for i in range(top_k)
+        ]
 
 
 class RewriteEngine(FakeEngine):
@@ -57,7 +59,7 @@ def cache_row(query, ids):
         "query": query,
         "top_k": 2,
         "latency": 1.5,
-        "docs": [{"id": i, "text": f"t {i}   x", "metadata": {}, "score": None} for i in ids],
+        "docs": [{"id": i, "text": f"t {i} \u2028 x", "metadata": {}, "score": None} for i in ids],
     }
 
 
