@@ -11,10 +11,13 @@ summary.json
 지표 정의 (warmup 요청 제외)
   dispatch 기회      gate 가 호출을 내보낼 때 대기열 길이 (= 남은 대기 n_waiting + 1).
                      2 이상이어야 정책이 순서를 고를 수 있다. choice_ge2 = 그런 dispatch 비율.
-  재정렬             gate 일련번호 (seq, gate lock 안에서 enqueue 순서대로 부여) 기준으로,
-                     더 작은 seq 의 호출이 아직 대기 중인데 나간 dispatch 를 센다.
-                     FCFS (호출 단위) 는 정의상 0 이어야 한다 (검증 기준).
-                     skipped = 그 dispatch 가 앞질러 간 대기 호출 수.
+  재정렬             dispatch 시각에 대기 중이던 호출 (enqueue = t - wait 로 복원) 중 기준 순서가 더
+                     앞선 호출이 남아 있었는데 나간 dispatch 를 센다. 기준 두 가지:
+                       call    호출 enqueue 순서 (gate seq) -> policy=fcfs 는 0 이어야 함
+                       arrival 요청 도착 순서 -> policy=fcfs_query 는 0 이어야 함
+                     fcfs_query 는 먼저 온 요청의 나중 호출을 앞세우므로
+                     call 기준 재정렬은 정상이다.
+                     복원한 대기열 길이가 gate 기록 (n_waiting) 과 다르면 경고한다.
   gate 대기          gate 안에서 기다린 시간 (scheduler_log.wait, gate 시계). calls.gate_wait 는
                      스레드 깨어남 지연까지 포함한 참고값.
   비용 추정          QueryState.est_history (정책이 dispatch 우선순위로 쓴 값, SJF/SRPT 만).
@@ -75,43 +78,76 @@ def spearman(x, y) -> float | None:
 
 
 # ---------------------------------------------------------------- dispatch
-def dispatch_metrics(log: list[dict], measured_keys: set[str]) -> dict:
-    """gate 로그 (dispatch 순서) 로 선택 기회와 재정렬을 계산한다."""
-    if not log:
-        return {"available": False}
-    pending = sorted(e["seq"] for e in log)  # 아직 나가지 않은 seq (오름차순)
-    pend_set = set(pending)
-    choices, reorders, skipped, waits = Counter(), 0, [], []
-    n_meas = 0
-    for e in log:  # 로그는 dispatch 순서대로 기록됨
-        seq = e["seq"]
-        earlier = 0
-        # seq 보다 작은데 아직 대기 중인 호출 수
-        while pending and pending[0] not in pend_set:
-            pending.pop(0)
-        if pending and pending[0] < seq:
-            earlier = sum(1 for s in pending if s < seq and s in pend_set)
-        pend_set.discard(seq)
+def _reorders(log: list[dict], keyf, measured_keys: set[str]) -> tuple[int, list[int], int]:
+    """dispatch 순서대로 보며, 그 시각에 대기 중이던 호출 중
+    기준 순서가 더 앞선 호출이 남아 있었으면
+    재정렬로 센다. 대기 여부는 gate 시계로 복원: enqueue 시각 = dispatch 시각 t - wait.
+
+    반환: (재정렬 dispatch 수, 앞지른 호출 수 목록, 대기열 길이 복원 불일치 수)
+    """
+    enq = {e["seq"]: e["t"] - e["wait"] for e in log}
+    keys = {e["seq"]: keyf(e) for e in log}
+    pending = set(enq)
+    count, skipped, mismatch = 0, [], 0
+    eps = 1e-9
+    for e in log:  # scheduler_log 는 dispatch 순서대로 기록됨
+        seq, now = e["seq"], e["t"]
+        pending.discard(seq)
+        waiting = [s for s in pending if enq[s] <= now + eps]
         if e.get("request_key") not in measured_keys:
             continue
-        n_meas += 1
-        choices[e["n_waiting"] + 1] += 1
-        waits.append(e["wait"])
+        if len(waiting) != e["n_waiting"]:
+            mismatch += 1
+        earlier = sum(1 for s in waiting if keys[s] < keys[seq])
         if earlier:
-            reorders += 1
+            count += 1
             skipped.append(earlier)
+    return count, skipped, mismatch
+
+
+def dispatch_metrics(
+    log: list[dict], measured_keys: set[str], arrivals: dict[str, float] | None = None
+) -> dict:
+    """gate 로그로 dispatch 기회와 재정렬을 계산한다.
+
+    재정렬 기준 두 가지:
+      call    : 호출 enqueue 순서 (gate seq). 호출 단위 FCFS (policy=fcfs) 는 0 이어야 한다.
+      arrival : 요청 도착 순서 (같은 요청 안에서는 seq).
+                query 단위 FCFS (fcfs_query) 는 0 이어야 한다.
+                fcfs_query 는 먼저 도착한 요청의 나중 호출 (예: rewrite) 을 늦게 도착한 요청의 먼저
+                enqueue 된 호출보다 앞세우므로 call 기준으로는 재정렬이 생기는 것이 정상이다.
+    """
+    if not log:
+        return {"available": False}
+    arrivals = arrivals or {}
+    measured = [e for e in log if e.get("request_key") in measured_keys]
+    n = len(measured)
+    choices = Counter(e["n_waiting"] + 1 for e in measured)
+    waits = [e["wait"] for e in measured]
     ge2 = sum(v for k, v in choices.items() if k >= 2)
+    call_n, call_skip, mismatch = _reorders(log, lambda e: (e["seq"],), measured_keys)
+    # warmup (도착 시각 없음) 은 측정 요청보다 먼저 끝나므로 가장 앞 순서로 둔다
+    arr_n, arr_skip, _ = _reorders(
+        log,
+        lambda e: (arrivals.get(e.get("request_key"), float("-inf")), e["seq"]),
+        measured_keys,
+    )
     return {
         "available": True,
-        "n_dispatch": n_meas,
-        "choice_ge2": ge2 / n_meas if n_meas else None,
+        "n_dispatch": n,
+        "choice_ge2": ge2 / n if n else None,
         "queue_len_mean": mean([k for k, v in choices.items() for _ in range(v)]),
         "queue_len_max": max(choices) if choices else None,
         "queue_len_hist": {str(k): v for k, v in sorted(choices.items())},
-        "reorder_dispatches": reorders,
-        "reorder_rate": reorders / n_meas if n_meas else None,
-        "reorder_rate_given_choice": reorders / ge2 if ge2 else None,
-        "skipped_mean": mean(skipped),
+        "reorder_vs_call_dispatches": call_n,
+        "reorder_vs_call_rate": call_n / n if n else None,
+        "reorder_vs_call_given_choice": call_n / ge2 if ge2 else None,
+        "reorder_vs_call_skipped_mean": mean(call_skip),
+        "reorder_vs_arrival_dispatches": arr_n,
+        "reorder_vs_arrival_rate": arr_n / n if n else None,
+        "reorder_vs_arrival_given_choice": arr_n / ge2 if ge2 else None,
+        "reorder_vs_arrival_skipped_mean": mean(arr_skip),
+        "queue_reconstruction_mismatch": mismatch,
         "gate_wait_mean_s": mean(waits),
         "gate_wait_p95_s": pct(waits, 95),
         "gate_wait_share_gt_10ms": mean([w > 0.01 for w in waits]),
@@ -173,6 +209,11 @@ def diag_run(run_dir: str | Path) -> dict:
     for c in calls:
         calls_by_req[c["request_index"]].append(c)
     measured = {f"{r['request_index']}:{r['query_id']}" for r in rows + errors}
+    arrivals = {
+        f"{r['request_index']}:{r['query_id']}": r["arrival"]
+        for r in rows + errors
+        if r.get("arrival") is not None
+    }
     sampled = end.get("engine_metrics_sampled") or {}
     cd = sampled.get("counter_delta") or {}
     qn = cd.get("queue_time_count")
@@ -200,7 +241,7 @@ def diag_run(run_dir: str | Path) -> dict:
         },
         "n_requests": len(rows),
         "n_errors": len(errors),
-        "dispatch": dispatch_metrics(read_jsonl(d / "scheduler_log.jsonl"), measured),
+        "dispatch": dispatch_metrics(read_jsonl(d / "scheduler_log.jsonl"), measured, arrivals),
         "calls_gate_wait_mean_s": mean([c["gate_wait"] for c in calls]),
         "estimates": estimate_metrics(rows, calls_by_req),
         "vllm": {
@@ -243,10 +284,22 @@ def consistency(runs: list[dict]) -> list[str]:
         warns.append(f"K 불일치: {[r['K'] for r in runs]}")
     for r in runs:
         d = r["dispatch"]
-        if r["policy"] == "fcfs" and d.get("available") and d["reorder_dispatches"]:
-            warns.append(
-                f"FCFS 인데 재정렬 {d['reorder_dispatches']}건: gate 로그 확인 필요 ({r['run']})"
-            )
+        if d.get("available"):
+            if r["policy"] == "fcfs" and d["reorder_vs_call_dispatches"]:
+                warns.append(
+                    f"fcfs (호출 단위) 인데 호출 순서 재정렬 "
+                    f"{d['reorder_vs_call_dispatches']}건 ({r['run']})"
+                )
+            if r["policy"] == "fcfs_query" and d["reorder_vs_arrival_dispatches"]:
+                warns.append(
+                    f"fcfs_query 인데 도착 순서 재정렬 "
+                    f"{d['reorder_vs_arrival_dispatches']}건 ({r['run']})"
+                )
+            if d["queue_reconstruction_mismatch"]:
+                warns.append(
+                    f"대기열 복원 불일치 {d['queue_reconstruction_mismatch']}건: "
+                    f"재정렬 수치가 근사일 수 있음 ({r['run']})"
+                )
         if r["n_errors"]:
             warns.append(f"오류 요청 {r['n_errors']}건 ({r['policy']})")
     return warns
@@ -287,7 +340,8 @@ def summary_md(runs: list[dict], warns: list[str], name: str) -> str:
         ("corr p95", lambda r: r["latency"]["corrected_p95"]),
         ("choice>=2", lambda r: r["dispatch"].get("choice_ge2")),
         ("queue mean", lambda r: r["dispatch"].get("queue_len_mean")),
-        ("reorder", lambda r: r["dispatch"].get("reorder_rate")),
+        ("reorder call", lambda r: r["dispatch"].get("reorder_vs_call_rate")),
+        ("reorder arrival", lambda r: r["dispatch"].get("reorder_vs_arrival_rate")),
         ("gate wait", lambda r: r["dispatch"].get("gate_wait_mean_s")),
         ("est rho", lambda r: (r["estimates"] or {}).get("spearman_vs_actual")),
         ("vLLM wait max", lambda r: r["vllm"]["waiting_max"]),
@@ -303,7 +357,10 @@ def summary_md(runs: list[dict], warns: list[str], name: str) -> str:
         lines.append("| " + " | ".join(fmt(f(r)) for _, f in cols) + " |")
     lines += [
         "",
-        "- choice>=2: 대기열 2 이상 dispatch 비율, reorder: FCFS 순서를 바꾼 dispatch 비율",
+        "- choice>=2: 대기열 2 이상 dispatch 비율",
+        "- reorder call: 호출 enqueue 순서 (호출 단위 FCFS) 를 바꾼 dispatch 비율 (fcfs 는 0)",
+        "- reorder arrival: 요청 도착 순서 (query 단위 FCFS) 를 바꾼 dispatch 비율 "
+        "(fcfs_query 는 0)",
         "- est rho: 비용 추정치와 실제 남은 호출 시간의 Spearman 순위 상관",
         "- gate wait: gate 안 대기 평균 (초), vLLM queue s: vLLM 내부 대기 평균 (집계)",
         "",
@@ -340,8 +397,11 @@ def per_run_rows(runs: list[dict]) -> list[dict]:
                 "throughput_rps": la["throughput_rps"],
                 "choice_ge2": d.get("choice_ge2"),
                 "queue_len_mean": d.get("queue_len_mean"),
-                "reorder_rate": d.get("reorder_rate"),
-                "reorder_rate_given_choice": d.get("reorder_rate_given_choice"),
+                "reorder_vs_call_rate": d.get("reorder_vs_call_rate"),
+                "reorder_vs_arrival_rate": d.get("reorder_vs_arrival_rate"),
+                "reorder_vs_call_given_choice": d.get("reorder_vs_call_given_choice"),
+                "reorder_vs_arrival_given_choice": d.get("reorder_vs_arrival_given_choice"),
+                "queue_reconstruction_mismatch": d.get("queue_reconstruction_mismatch"),
                 "gate_wait_mean_s": d.get("gate_wait_mean_s"),
                 "gate_wait_p95_s": d.get("gate_wait_p95_s"),
                 "est_spearman": e.get("spearman_vs_actual"),
