@@ -15,6 +15,19 @@ import analyze_runs  # noqa: E402
 from crag_fixtures import FakeEngine, Retriever, Web  # noqa: E402
 from runner import Components, Runner  # noqa: E402
 
+from rag.types import Document  # noqa: E402
+
+# str.splitlines() 는 나누지만 JSON Lines 구분자는 아닌 문자 (실제 Tavily 본문에 나올 수 있음)
+SEPARATORS = "\u2028\u2029\x85\x1c\x1d\x1e\x0b\x0c"
+
+
+class SeparatorWeb(Web):
+    """본문에 줄 구분 유니코드 문자가 들어 있는 web 검색 결과."""
+
+    def search(self, query, top_k):
+        self.n += 1
+        return [Document(id=f"w{i}", text=f"web {i}{SEPARATORS}second part") for i in range(top_k)]
+
 
 class WebHurtsEngine(FakeEngine):
     """web 문서만으로 생성하면 오답 (Incorrect 경로 회귀를 흉내)."""
@@ -44,7 +57,7 @@ def runs(setup, tmp_path):
         "vanilla": (["exp_id=SMOKE-V", "pipeline=vanilla"], Web(), FakeEngine()),
         "full": (
             ["exp_id=SMOKE-F", "grading.strategy=full"],
-            RecordingWebSearch(Web(), rec),
+            RecordingWebSearch(SeparatorWeb(), rec),
             WebHurtsEngine(),
         ),
         "lazy_hit": (["exp_id=SMOKE-L", "grading.strategy=lazy_hit"], Web(), WebHurtsEngine()),
@@ -142,3 +155,18 @@ def test_bootstrap_ci_helpers():
     assert analyze_runs.mcnemar_exact(0, 6) == pytest.approx(2 / 64)
     idx = analyze_runs.boot_idx(4, 10, 0)
     assert idx.shape == (10, 4) and idx.max() < 4
+
+
+def test_read_jsonl_keeps_unicode_line_separators_inside_strings(tmp_path):
+    p = tmp_path / "x.jsonl"
+    rows = [{"text": f"a{SEPARATORS}b"}, {"text": "plain"}]
+    p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    assert len(p.read_text(encoding="utf-8").splitlines()) > 2  # 이전 구현이 깨지던 조건
+    assert analyze_runs.read_jsonl(p) == rows
+
+
+def test_read_jsonl_reports_path_and_line_on_real_corruption(tmp_path):
+    p = tmp_path / "bad.jsonl"
+    p.write_text('{"ok": 1}\n{"broken": \n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"bad\.jsonl:2"):
+        analyze_runs.read_jsonl(p)

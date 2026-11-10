@@ -75,9 +75,25 @@ NUM_ONLY = re.compile(r"^\s*\d*\.?\d+\s*\.?\s*$")
 
 # ---------------------------------------------------------------- loading
 def read_jsonl(path: Path) -> list[dict]:
+    """JSON Lines 를 줄바꿈 ('\\n') 기준으로 읽는다.
+
+    str.splitlines() 를 쓰면 안 된다: U+2028, U+2029, U+0085, \\x1c~\\x1e 에서도 줄을 나누는데,
+    json.dumps(ensure_ascii=False) 는 이 문자들을 이스케이프하지 않으므로 (예: Tavily 본문)
+    한 레코드가 중간에서 잘려 JSONDecodeError 가 난다. 파일 반복은 '\\n' 으로만 나눈다.
+    파싱 실패는 무시하지 않고 파일 경로와 줄 번호를 붙여 다시 올린다.
+    """
     if not path.exists():
         return []
-    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{n}: JSON 파싱 실패: {e}") from e
+    return rows
 
 
 def load_run(name: str, run_dir: Path) -> dict:
