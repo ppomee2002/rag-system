@@ -39,6 +39,7 @@ from runner import (  # noqa: E402
 )
 from workload import make_workload  # noqa: E402
 
+from rag.retrieval.web_cache import read_jsonl  # 줄바꿈 기준, 손상 시 경로:줄번호 보고  # noqa: E402
 from rag.telemetry.run_meta import create_run_dir, write_new  # noqa: E402
 
 EXP_ID = "PRE-K"
@@ -72,11 +73,7 @@ def row_for(k: int, run_dir: Path) -> dict:
     end = json.loads((run_dir / "run_end.json").read_text(encoding="utf-8"))
     sampled = end.get("engine_metrics_sampled") or {}
     counters = sampled.get("counter_delta") or {}
-    calls = [
-        json.loads(x)
-        for x in (run_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()
-        if x.strip()
-    ]
+    calls = read_jsonl(run_dir / "calls.jsonl")
     measured = [c for c in calls if not c.get("warmup")]
     span = None
     if measured:

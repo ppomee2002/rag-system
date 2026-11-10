@@ -28,6 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from comparability import compare_runs  # noqa: E402
 
+from rag.retrieval.web_cache import read_jsonl  # 줄바꿈 기준, 손상 시 경로:줄번호 보고  # noqa: E402
+
 ENGINE_CHECKS = {"llm", "engine_identity"}  # 엔진 비교에서는 달라도 되는 항목
 NUM_ONLY = re.compile(r"^\s*\d*\.?\d+\s*\.?\s*$")
 ANY_NUM = re.compile(r"\d*\.?\d+")
@@ -72,9 +74,9 @@ def _band(s: float, upper: float, lower: float) -> str:
 def _grade_format(run_dir: str) -> dict | None:
     path = Path(run_dir) / "calls.jsonl"
     outs = [
-        json.loads(x).get("output_text")
-        for x in path.read_text(encoding="utf-8").splitlines()
-        if x.strip() and json.loads(x).get("kind") == "grade" and not json.loads(x).get("warmup")
+        c.get("output_text")
+        for c in read_jsonl(path)
+        if c.get("kind") == "grade" and not c.get("warmup")
     ]
     outs = [o for o in outs if o is not None]
     if not outs:
@@ -111,11 +113,7 @@ def compare_quality(run_a: str, run_b: str, upper: float = 0.7, lower: float = 0
         rows.append(
             {
                 r["request_index"]: r
-                for r in (
-                    json.loads(x)
-                    for x in (Path(d) / "queries.jsonl").read_text(encoding="utf-8").splitlines()
-                    if x.strip()
-                )
+                for r in read_jsonl(Path(d) / "queries.jsonl")
                 if not r.get("warmup") and not r.get("error")
             }
         )

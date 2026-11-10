@@ -23,16 +23,14 @@ from pathlib import Path
 
 import yaml
 
+from rag.retrieval.web_cache import read_jsonl  # 줄바꿈 기준, 손상 시 경로:줄번호 보고
+
 PRIORITY_KEYS = ("send_priority", "server_scheduling_policy", "launch_meta")
 
 
 def _load(run_dir: Path) -> dict:
     run_dir = Path(run_dir)
-    rows = [
-        json.loads(x)
-        for x in (run_dir / "queries.jsonl").read_text(encoding="utf-8").splitlines()
-        if x.strip()
-    ]
+    rows = read_jsonl(run_dir / "queries.jsonl")
     end = run_dir / "run_end.json"
     return {
         "dir": str(run_dir),
