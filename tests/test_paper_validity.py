@@ -289,7 +289,7 @@ def test_server_probe_against_mock(mock_server):
     prio = mock_server("vllm", sched_policy="priority")
     eng2 = VLLMEngine("mock-model", base_url=prio.url + "/v1", api_key_env=None)
     assert probe_server_priority(eng2, "priority")["nonzero_priority_accepted"] is True
-    assert "warning" in probe_server_priority(eng2, "fcfs")
+    assert "note" in probe_server_priority(eng2, "fcfs")  # 0.33.0: 수락만으로 판별 불가
     assert "skipped" in probe_server_priority(OllamaEngine("m"), "priority")
 
 
@@ -297,7 +297,7 @@ def test_runner_rejects_priority_mismatch_before_run_dir(setup):
     tmp, make = setup
     with pytest.raises(PreflightError):
         Runner(*make(["scheduler.policy=fcfs", "scheduler.engine_priority=key"]), run_id="bad")
-    assert not (tmp / "results" / "crag_system" / "SYS-dev" / "bad").exists()
+    assert not (tmp / "results" / "crag_system" / "smoke" / "SMOKE-dev" / "bad").exists()
 
 
 def test_runner_server_probe_failure_is_recorded(setup, mock_server):
@@ -414,7 +414,7 @@ def test_runner_rejects_cost_model_trained_on_eval_queries(setup):
     wl = make_wl(pool_ids(cfg)[1], 5, seed=0, rate=100.0)
     with pytest.raises(PreflightError, match="겹침"):
         Runner(cfg, comp, workload=wl, run_id="leak")
-    assert not (tmp / "results" / "crag_system" / "SYS-dev" / "leak").exists()
+    assert not (tmp / "results" / "crag_system" / "smoke" / "SMOKE-dev" / "leak").exists()
 
 
 # ================================================================ 5. 공정 비교

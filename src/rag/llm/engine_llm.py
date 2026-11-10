@@ -119,6 +119,7 @@ class EngineLLM:
                 idx=idx,
                 priority=priority if uses_priority else None,
                 dispatch_key=list(ticket.key_at_grant) if ticket else None,
+                output_text=(response.text[:2000] if response and r.record_texts else None),
                 engine_priority=response.priority_sent if response else None,
                 t_enqueue=r.rel(t_enqueue),
                 t_start=r.rel(t_start),

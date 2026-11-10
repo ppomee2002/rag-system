@@ -1,0 +1,41 @@
+# 엔진 프로필: Llama 3.1 8B Instruct BF16, GPU 2장 (TP=2)
+# - client 설정 (llm:) 과 서버 launch 설정 (server:) 을 한 파일에서 관리한다.
+# - estimates: 는 사양 기반 추정치. verify_launch.py 가 실제 값과 비교해 기록한다.
+# - A2 는 NVLink 가 없어 TP all-reduce 가 PCIe 를 거친다 (nvidia-smi topo -m 결과를 함께 기록).
+experiment: crag_system
+engine_profile: vllm_bf16_tp2
+
+llm:
+  provider: vllm
+  model: meta-llama/Llama-3.1-8B-Instruct                    # server.model 과 같아야 함
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY
+  temperature: 0.0
+  max_tokens: 512
+  seed: 0
+  stream: true
+  send_priority: false
+  server_scheduling_policy: fcfs
+  launch_meta: null
+  timeout: 600
+
+server:
+  vllm_version: "0.33.0"
+  model: meta-llama/Llama-3.1-8B-Instruct
+  n_gpus: 2
+  tensor_parallel_size: 2
+  dtype: bfloat16
+  quantization: null
+  max_model_len: 6144
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 8
+  generation_config: vllm
+  enable_prefix_caching: true
+  seed: 0
+  port: 8000
+
+estimates:                           # 추정치 (검증 전)
+  weights_gib_per_gpu: 7.5
+  kv_cache_gib_per_gpu: 4.0
+  kv_cache_tokens: 60000
+  max_concurrency_at_max_model_len: 10

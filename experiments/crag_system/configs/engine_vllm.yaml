@@ -1,5 +1,5 @@
-# configs/base.yaml 위에 덮어쓰는 값. 주 추론 엔진 (vLLM, OpenAI 호환 서버).
-# 서버는 scripts/server/launch_vllm.sh 로 띄운다. 이 값들은 launch 설정과 짝이 맞아야 한다.
+# (이전 설정) 엔진 프로필 configs/engines/*.yaml 을 사용할 것.
+# 프로필은 client (llm:) 와 서버 launch (server:) 설정을 함께 담고 launch_vllm.py 가 검사한다.
 experiment: crag_system
 
 llm:

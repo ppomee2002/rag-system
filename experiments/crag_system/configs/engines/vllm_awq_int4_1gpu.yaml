@@ -1,0 +1,42 @@
+# 엔진 프로필: Llama 3.1 8B Instruct AWQ INT4, GPU 1장 (TP=1)
+# - client 설정 (llm:) 과 서버 launch 설정 (server:) 을 한 파일에서 관리한다.
+#   server: 는 scripts/server/launch_vllm.py 가 읽고, llm: 은 runner / probe 가 읽는다.
+# - estimates: 는 사양 기반 추정치일 뿐이다. launch 후 verify_launch.py 가 vLLM 로그·nvidia-smi 의
+#   실제 값과 비교해 기록한다. 실험 설정 결정은 실제 값으로 한다.
+experiment: crag_system
+engine_profile: vllm_awq_int4_1gpu
+
+llm:
+  provider: vllm
+  model: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4   # server.model 과 같아야 함
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY
+  temperature: 0.0
+  max_tokens: 512
+  seed: 0
+  stream: true
+  send_priority: false
+  server_scheduling_policy: fcfs     # launch_vllm.py --sched-policy 와 일치 (preflight 가 launch 기록과 대조)
+  launch_meta: null                  # launch_vllm.py 가 출력한 *_launch.json 경로
+  timeout: 600
+
+server:
+  vllm_version: "0.33.0"             # 설치 버전과 다르면 launch 거부 (--allow-version-mismatch)
+  model: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+  n_gpus: 1
+  tensor_parallel_size: 1            # n_gpus 및 CUDA_VISIBLE_DEVICES 개수와 같아야 함
+  dtype: auto                        # AWQ: 체크포인트 기준 (fp16 activations)
+  quantization: null                 # null = 체크포인트 config 로 자동 감지 (0.33.0: AutoAWQConfig)
+  max_model_len: 6144                # 기존 num_ctx 와 동일
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 8
+  generation_config: vllm            # 체크포인트별 generation_config.json 기본값을 쓰지 않음 (BF16 과 동일 조건)
+  enable_prefix_caching: true
+  seed: 0
+  port: 8000
+
+estimates:                           # 추정치 (검증 전). verify_launch.py 결과로 대체
+  weights_gib_per_gpu: 5.5
+  kv_cache_gib_per_gpu: 6.0
+  kv_cache_tokens: 45000
+  max_concurrency_at_max_model_len: 7

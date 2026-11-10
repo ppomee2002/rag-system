@@ -63,23 +63,39 @@ def check_priority_config(scheduler_cfg: dict | None, llm_cfg: dict) -> dict:
 
 def launch_meta_policy(path: str | Path) -> dict:
     """launch_vllm.sh 의 *_launch.json 에서 모델과 --scheduling-policy 를 읽는다."""
-    meta = json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path).expanduser()
+    meta = json.loads(path.read_text(encoding="utf-8"))
     argv = meta["argv"]
 
     def arg(name):
         return argv[argv.index(name) + 1] if name in argv else None
 
     model = argv[2] if len(argv) > 2 and argv[1] == "serve" else None
+    tp = arg("--tensor-parallel-size")
     return {
         "path": str(path),
         "model": model,
         "scheduling_policy": arg("--scheduling-policy"),
         "max_num_seqs": arg("--max-num-seqs"),
+        "max_model_len": arg("--max-model-len"),
+        "tensor_parallel_size": int(tp) if tp else 1,
+        "generation_config": arg("--generation-config"),
+        "enforce_eager": "--enforce-eager" in argv,
+        "cuda_visible_devices": meta.get("cuda_visible_devices"),
+        "profile_name": (meta.get("profile") or {}).get("name"),
+        "profile_sha256": (meta.get("profile") or {}).get("sha256"),
+        "smoke": meta.get("smoke"),
         "argv": argv,
     }
 
 
-def check_launch_meta(path: str | Path, llm_cfg: dict) -> dict:
+def check_launch_meta(
+    path: str | Path,
+    llm_cfg: dict,
+    server_cfg: dict | None = None,
+    profile_name: str | None = None,
+) -> dict:
+    """launch 기록 (launch_vllm.py *_launch.json) 과 client config / 엔진 프로필을 대조."""
     info = launch_meta_policy(path)
     declared = llm_cfg.get("server_scheduling_policy")
     actual = info["scheduling_policy"] or "fcfs"  # 인자 없으면 vLLM 기본 fcfs
@@ -91,15 +107,43 @@ def check_launch_meta(path: str | Path, llm_cfg: dict) -> dict:
         raise PreflightError(
             f"서버 모델 {info['model']} 와 llm.model {llm_cfg.get('model')} 불일치"
         )
+    visible = info["cuda_visible_devices"]
+    if visible is not None:
+        n_visible = len([d for d in str(visible).split(",") if d.strip()])
+        if n_visible != info["tensor_parallel_size"]:
+            raise PreflightError(
+                f"launch 기록의 GPU 수 ({n_visible}) != tensor_parallel_size "
+                f"({info['tensor_parallel_size']})"
+            )
+    if server_cfg:
+        expect = {
+            "tensor_parallel_size": server_cfg.get("tensor_parallel_size"),
+            "max_model_len": None
+            if server_cfg.get("max_model_len") is None
+            else str(server_cfg["max_model_len"]),
+            "generation_config": server_cfg.get("generation_config"),
+        }
+        for key, want in expect.items():
+            if want is not None and info[key] != want:
+                raise PreflightError(
+                    f"launch 기록의 {key}={info[key]} 와 엔진 프로필 {want} 불일치"
+                )
+    if profile_name and info["profile_name"] and info["profile_name"] != profile_name:
+        raise PreflightError(
+            f"launch 프로필 {info['profile_name']} 와 config engine_profile {profile_name} 불일치"
+        )
     return {**info, "actual_scheduling_policy": actual}
 
 
 def probe_server_priority(engine, declared: str | None) -> dict:
     """priority=1 짧은 요청으로 서버가 priority 를 받는지 확인 (요청 1회).
 
-    수락 여부와 서버 정책의 관계는 vLLM 버전에 따라 다를 수 있다:
+    수락 여부로 알 수 있는 것은 제한적이다:
       - 선언 priority 인데 거부 -> 확실한 불일치 (오류)
-      - 선언 fcfs 인데 수락     -> 버전에 따라 FCFS 서버도 수락할 수 있어 판정 불가 (경고만 기록)
+      - 선언 fcfs 인데 수락     -> vLLM 0.33.0 소스에는 FCFS 서버가 priority 를 거부하는 코드가 없어
+                                   수락이 정상일 수 있다. 정책 판별은 처리 순서 검증
+                                   (scripts/server/probe_engine.py priority_order) 과
+                                   launch 기록으로 한다.
     """
     from rag.llm.engine import EngineError, LLMRequest
     from rag.llm.vllm_engine import VLLMEngine
@@ -126,7 +170,7 @@ def probe_server_priority(engine, declared: str | None) -> dict:
     if declared == "priority" and not accepted:
         raise PreflightError(f"서버가 priority 요청을 거부함 (선언: priority): {detail}")
     if declared == "fcfs" and accepted:
-        out["warning"] = "FCFS 로 선언했지만 priority 요청이 수락됨 (버전에 따라 정상일 수 있음)"
+        out["note"] = "FCFS 서버도 priority 를 수락할 수 있음 (0.33.0). 수락 여부로 정책 판별 불가"
     return out
 
 

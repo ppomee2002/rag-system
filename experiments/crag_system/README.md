@@ -18,7 +18,12 @@ LangGraph + vLLM + Custom Scheduler 기반 Corrective RAG 통합 시스템. Grad
 | **`SYS-2`** | Grading Optimization (Full / Lazy-hit / Batch / Adaptive) | 신규 |
 | **`SYS-3`** | Scheduling Optimization (FCFS / SRPT-est / Aging / 대기 제한 / Correction-aware) | 신규 |
 | **`SYS-4`** | Integrated Evaluation (2×2 + 후보) | 신규 |
-| `SYS-P` | 엔진 / 서버 점검 (probe) | 신규, `scripts/server/probe_engine.py` |
+| `SMOKE-*` | smoke: 환경·기능 확인 (예: `SMOKE-P` probe, `SMOKE-1` 소규모 실행). 논문 결과 아님 | `run.purpose=smoke` |
+| `PRE-*` | 예비 측정: 엔진 비교 (`PRE-Q` 품질), K calibration (`PRE-K`) | `run.purpose=pre` |
+
+결과 폴더는 `results/crag_system/<purpose>/<ID>/<timestamp>/` 로 smoke / pre / paper 가 분리된다.
+`SYS-*` (purpose=paper) 는 `--paper-approved` 와 재현 조건 (git clean, 엔진 프로필·launch 기록,
+`--enforce-eager` 아닌 서버, `--limit` 없음) 이 모두 있어야 실행된다 (`runner.check_purpose`).
 
 세부 조건은 소문자 접미사: 예) `SYS-1a` Ollama 재현(203), `SYS-1b` vLLM Baseline(203), `SYS-1c` 엔진 bridge,
 `SYS-2x` Continuous Batching × Batch Grading 분리 실험. 문항 수는 `n203` / `n1399` 태그로 기록한다.
@@ -239,3 +244,18 @@ done
 | prefix cache 교란 크기 | 조건 순서에 따라 latency 가 달라질 수 있음 | `run_end.prefix_cache_delta`, ABBA 순서 비교 |
 | Adaptive 임계값 | 데이터 기반 튜닝 필요 | dev split 에서 튜닝 후 고정 |
 | 다른 사용자 GPU 간섭 | 공유 서버 | `run_meta.json` / `run_end.json` 의 `gpu`, `gpu_after` |
+
+## 엔진 프로필과 예비 측정 (2026-11-10, vLLM 0.33.0 기준)
+
+| 파일 | 내용 |
+|---|---|
+| `configs/engines/vllm_awq_int4_1gpu.yaml` | AWQ INT4, GPU 1장. client (`llm:`) + 서버 (`server:`) + 추정치 (`estimates:`) |
+| `configs/engines/vllm_bf16_tp2.yaml` | BF16, TP=2 (GPU 2장) |
+| `scripts/server/launch_vllm.py` | 프로필로 서버 실행. TP == GPU 수, vLLM 버전, 옵션 지원, GPU 점유, 포트 검사 후 실행 |
+| `scripts/server/verify_launch.py` | 로그 (모델 메모리, KV cache, 최대 동시 처리) · nvidia-smi · API 로 추정치 검증 |
+| `scripts/server/probe_engine.py` | SMOKE-P: 기본 점검, CRAG 패턴 sweep, priority 처리 순서 검증 |
+| `calibrate_k.py` | PRE-K: 실제 CRAG pipeline 으로 K 별 처리량·vLLM 대기열·preemption |
+| `compare_quality.py` | PRE-Q: 엔진 간 같은 질문·prompt 품질 비교 |
+
+vLLM 0.33.0 소스에서 확인한 사항은 `scripts/server/launch_vllm.py` 상단 docstring 참고.
+특히 FCFS 서버도 priority 요청을 거부하지 않을 수 있어 priority 는 처리 순서로 검증한다.

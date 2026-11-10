@@ -100,9 +100,14 @@ def vllm_info():
     }
 
     def request_fields():
-        from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+        try:  # vLLM 0.33.0 경로
+            from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+        except ImportError:  # 이전 버전 경로
+            from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
         fields = ChatCompletionRequest.model_fields
+        doc = (fields["priority"].description or "") if "priority" in fields else ""
+        out["priority_field_description"] = doc[:300]
         return {
             k: k in fields
             for k in (

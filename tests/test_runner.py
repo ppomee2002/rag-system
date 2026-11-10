@@ -221,8 +221,8 @@ def test_cli_run(setup, monkeypatch):
     monkeypatch.setattr(
         run_cli,
         "Runner",
-        lambda c, workload=None, run_id=None: __import__("runner").Runner(
-            c, comp, workload=workload, run_id=run_id
+        lambda c, workload=None, run_id=None, paper_approved=False: __import__("runner").Runner(
+            c, comp, workload=workload, run_id=run_id, paper_approved=paper_approved
         ),
     )
     run_dir = run_cli.main(
@@ -230,14 +230,16 @@ def test_cli_run(setup, monkeypatch):
             "--overlay",
             str(tmp / "overlay.yaml"),
             "--exp-id",
-            "SYS-test",
+            "SMOKE-test",
             "--set",
             "grading.strategy=lazy_hit",
             "--limit",
             "6",
         ]
     )
-    assert run_dir.parent.name == "SYS-test"
+    assert run_dir.parent.name == "SMOKE-test" and run_dir.parent.parent.name == "smoke"
+    cfg_saved = (run_dir / "config.yaml").read_text(encoding="utf-8")
+    assert "limit_override: 6" in cfg_saved
     assert len(read_jsonl(run_dir / "queries.jsonl")) == 6
 
 
@@ -256,4 +258,4 @@ def test_invalid_config_leaves_no_run_dir(setup):
     ):
         with pytest.raises(ValueError):
             Runner(*make(sets), run_id="bad")
-    assert not (tmp / "results" / "crag_system" / "SYS-dev" / "bad").exists()
+    assert not (tmp / "results" / "crag_system" / "smoke" / "SMOKE-dev" / "bad").exists()

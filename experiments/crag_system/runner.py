@@ -5,7 +5,14 @@
   mode=sequential : 요청을 하나씩 실행 (부하 없음). 정확도·단계별 latency·trace (cost model 입력)
   mode=live       : workload 의 도착 시각대로 open-loop 동시 실행. 스케줄링·동시 부하 실험
 
-결과: results/crag_system/<exp_id>/<run_id>/
+실험 구분 (run.purpose, 결과 폴더와 exp_id 접두사로 분리):
+  smoke : 환경·기능 확인. exp_id SMOKE-*. 결과를 논문에 쓰지 않음
+  pre   : 예비 측정 (엔진 비교, 품질 확인, K calibration). exp_id PRE-*
+  paper : 논문 본실험 SYS-1~4. exp_id SYS-<n>*. --paper-approved 와 아래 조건이 모두 필요
+          (git 작업트리 clean, 엔진 프로필·launch 기록 지정, smoke launch (--enforce-eager) 아님,
+           --limit 로 질문 수를 줄이지 않음)
+
+결과: results/crag_system/<purpose>/<exp_id>/<run_id>/
   config.yaml, run_meta.json   실행 전 기록 (git, 패키지, GPU 상태, 엔진 정보, workload hash)
   queries.jsonl                요청 단위 결과 (warmup 행은 warmup=true)
   calls.jsonl                  LLM 호출 단위 기록 (request_index 로 queries 와 연결)
@@ -25,9 +32,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
-from rag.config import _deep_merge, load_config
+from rag.config import load_layered_config, parse_set  # noqa: F401 (re-export)
 from rag.data.loader import load_qa_jsonl
 from rag.eval.metrics import score_all
 from rag.grading import build_grader
@@ -50,10 +56,12 @@ from rag.scheduling.preflight import (
     probe_server_priority,
 )
 from rag.telemetry.calls import CallRecorder
+from rag.telemetry.engine_metrics import MetricsSampler
 from rag.telemetry.run_meta import (
     JsonlWriter,
     collect_run_metadata,
     create_run_dir,
+    git_info,
     gpu_snapshot,
     write_new,
     write_run_files,
@@ -61,30 +69,53 @@ from rag.telemetry.run_meta import (
 from rag.types import QAExample
 
 PIPELINES = ("crag_graph", "crag", "vanilla")
+PURPOSE_PREFIX = {"smoke": "SMOKE-", "pre": "PRE-", "paper": "SYS-"}
+
+
+class PurposeError(ValueError):
+    pass
+
+
+def check_purpose(cfg: dict, paper_approved: bool = False, git: dict | None = None) -> dict:
+    """smoke / pre / paper 구분 검사. paper (SYS-1~4) 는 별도 승인과 재현 조건을 요구한다."""
+    run = cfg.get("run") or {}
+    purpose = run.get("purpose", "smoke")
+    exp_id = cfg.get("exp_id", "")
+    if purpose not in PURPOSE_PREFIX:
+        raise PurposeError(f"run.purpose: {tuple(PURPOSE_PREFIX)} (got {purpose})")
+    prefix = PURPOSE_PREFIX[purpose]
+    if not exp_id.startswith(prefix):
+        raise PurposeError(f"purpose={purpose} 의 exp_id 는 {prefix}* 이어야 함 (got {exp_id})")
+    for other, pre in PURPOSE_PREFIX.items():
+        if other != purpose and exp_id.startswith(pre):
+            raise PurposeError(f"exp_id {exp_id} 는 purpose={other} 용")
+    if purpose != "paper":
+        return {"purpose": purpose, "exp_id": exp_id}
+    problems = []
+    if not paper_approved:
+        problems.append("SYS 본실험은 별도 승인 후 --paper-approved 로만 실행")
+    git = git if git is not None else git_info()
+    if git.get("dirty") is not False:
+        problems.append(f"git 작업트리가 clean 하지 않음 (dirty={git.get('dirty')})")
+    if run.get("limit_override") is not None:
+        problems.append("--limit 로 질문 수를 줄인 run 은 본실험이 될 수 없음")
+    llm = cfg.get("llm") or {}
+    if llm.get("provider") == "vllm":
+        if not cfg.get("engine_profile"):
+            problems.append("engine_profile (엔진 프로필 overlay) 이 필요")
+        if not llm.get("launch_meta"):
+            problems.append("llm.launch_meta (launch 기록) 가 필요")
+    if problems:
+        raise PurposeError("본실험 조건 미충족: " + "; ".join(problems))
+    return {
+        "purpose": purpose,
+        "exp_id": exp_id,
+        "paper_approved": True,
+        "git_commit": git.get("commit"),
+    }
 
 
 # ---------------------------------------------------------------- config
-def parse_set(expr: str) -> tuple[list[str], Any]:
-    key, sep, raw = expr.partition("=")
-    if not sep:
-        raise ValueError(f"--set 은 key=value 형식: {expr}")
-    return key.split("."), yaml.safe_load(raw)
-
-
-def load_layered_config(config: str | Path, overlays=(), sets=()) -> dict:
-    """base.yaml + config + overlay 들 (순서대로 deep-merge) + --set key.sub=value."""
-    cfg = load_config(config)
-    for p in overlays:
-        cfg = _deep_merge(cfg, yaml.safe_load(Path(p).read_text(encoding="utf-8")) or {})
-    for expr in sets:
-        keys, value = parse_set(expr)
-        node = cfg
-        for k in keys[:-1]:
-            node = node.setdefault(k, {})
-        node[keys[-1]] = value
-    return cfg
-
-
 # ---------------------------------------------------------------- components
 class SharedRetriever:
     """FAISS + encoder 를 여러 thread 가 공유할 때 호출을 직렬화 (원본: correction_scheduling)."""
@@ -307,8 +338,10 @@ class Runner:
         components: Components | None = None,
         workload: dict | None = None,
         run_id: str | None = None,
+        paper_approved: bool = False,
     ):
         self.cfg = cfg
+        self.purpose_check = check_purpose(cfg, paper_approved)
         self.mode = cfg.get("run", {}).get("mode", "sequential")
         if self.mode not in ("sequential", "live"):
             raise ValueError("run.mode: sequential | live")
@@ -331,7 +364,13 @@ class Runner:
         sched = cfg.get("scheduler") or {}
         self.preflight: dict = {"priority": check_priority_config(sched, cfg["llm"])}
         if cfg["llm"].get("launch_meta"):
-            self.preflight["launch_meta"] = check_launch_meta(cfg["llm"]["launch_meta"], cfg["llm"])
+            self.preflight["launch_meta"] = check_launch_meta(
+                cfg["llm"]["launch_meta"], cfg["llm"], cfg.get("server"), cfg.get("engine_profile")
+            )
+            if self.purpose_check["purpose"] == "paper" and self.preflight["launch_meta"].get(
+                "enforce_eager"
+            ):
+                raise PurposeError("smoke launch (--enforce-eager) 서버로는 본실험을 할 수 없음")
         cost_model = components.cost_model if components else None
         if cost_model is None:
             cost_model = load_cost_model(sched.get("cost_model"))
@@ -343,9 +382,9 @@ class Runner:
             )
         self.gate = self._build_gate(cost_model)
 
-        exp_id = cfg.get("exp_id", "SYS-dev")
+        purpose, exp_id = self.purpose_check["purpose"], self.purpose_check["exp_id"]
         self.run_dir = create_run_dir(
-            f"crag_system/{exp_id}", cfg.get("output_dir", "results"), run_id
+            f"crag_system/{purpose}/{exp_id}", cfg.get("output_dir", "results"), run_id
         )
         self.comp = components or build_components(cfg, self.run_dir)
         self.comp.cost_model = cost_model
@@ -409,7 +448,7 @@ class Runner:
             t0=t0,
             request_key=f"{req['i']}:{ex.id}",
         )
-        rec = CallRecorder(t0)
+        rec = CallRecorder(t0, record_texts=bool(self.cfg.get("run", {}).get("record_texts")))
         kw = {"recorder": rec, "query_state": q}
         if self.gate is not None:
             kw["scheduler"] = self.gate
@@ -502,6 +541,16 @@ class Runner:
             "session": cfg.get("run", {}).get("session"),  # {id, order_index}: 조건 실행 순서
         }
 
+    def _start_sampler(self) -> MetricsSampler | None:
+        """run.sample_engine_metrics_sec 가 있으면 측정 구간 동안 vLLM /metrics 를 기록."""
+        interval = self.cfg.get("run", {}).get("sample_engine_metrics_sec")
+        fn = getattr(self.comp.engine, "metrics_text", None)
+        if not interval or fn is None:
+            return None
+        from rag.llm.vllm_engine import parse_prometheus
+
+        return MetricsSampler(lambda: parse_prometheus(fn()), float(interval), t0=self.t0).start()
+
     def _engine_metrics(self):
         fn = getattr(self.comp.engine, "metrics_text", None)
         if fn is None:
@@ -532,6 +581,7 @@ class Runner:
             },
             "n_warmup": len(self.warmup),
             "n_requests": len(self.requests),
+            "purpose": self.purpose_check,
             "preflight": self.preflight,
             "comparability": self._comparability_record(),
         }
@@ -559,11 +609,17 @@ class Runner:
         for i, ex in enumerate(self.warmup):  # warmup 은 항상 순차
             self._execute({"i": -1 - i, "query_id": ex.id, "arrival": None}, t0, warmup=True)
         self.t0 = time.perf_counter()
+        sampler = self._start_sampler()
         if self.mode == "sequential":
             for req in self.requests:
                 self._execute(req, self.t0, warmup=False)
         else:
             self._run_live()
+        sampled = sampler.stop() if sampler else None
+        if sampler:
+            writer = JsonlWriter(self.run_dir / "engine_metrics.jsonl")
+            for row in sampler.samples:
+                writer.write(row)
 
         end = {
             "wall_seconds": time.perf_counter() - started,
@@ -572,6 +628,7 @@ class Runner:
             "engine_metrics_before": metrics_before,
             "engine_metrics_after": (metrics_after := self._engine_metrics()),
             "prefix_cache_delta": metric_delta(metrics_before, metrics_after, "prefix_cache"),
+            "engine_metrics_sampled": sampled,
             "scheduler": None
             if self.gate is None
             else {"max_waiting": self.gate.max_waiting, "dispatches": len(self.gate.log)},

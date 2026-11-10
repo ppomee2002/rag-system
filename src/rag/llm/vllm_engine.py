@@ -147,16 +147,21 @@ class VLLMEngine:
     def reset_prefix_cache(self) -> dict:
         """조건 사이 prefix cache 초기화 (`POST /reset_prefix_cache`).
 
-        이 endpoint 는 버전에 따라 없거나 개발 모드 (`VLLM_SERVER_DEV_MODE=1`) 에서만 열릴 수 있다.
+        vLLM 0.33.0: `VLLM_SERVER_DEV_MODE=1` 로 띄운 서버에만 있고 (없으면 404),
+        `{"success": bool}` 을 돌려준다. 실행 중인 요청이 block 을 잡고 있으면 success=false.
         실패해도 예외 대신 결과를 돌려주고 runner 가 run_end.json 에 기록한다.
         """
         try:
             with self.transport._request(
                 f"{self.server_root}/reset_prefix_cache", {}, self._headers(), "POST"
             ) as resp:
-                return {"ok": True, "status": resp.status}
+                raw = resp.read().decode("utf-8", errors="replace")
+                body = json.loads(raw) if raw.strip().startswith("{") else {}
+                success = body.get("success")
+                return {"ok": success is not False, "success": success, "status": resp.status}
         except EngineError as e:
-            return {"ok": False, "status": e.status, "error": str(e)[:300]}
+            hint = " (dev mode 아님: launch_vllm.py --dev-mode)" if e.status == 404 else ""
+            return {"ok": False, "status": e.status, "error": str(e)[:300] + hint}
 
     def describe(self) -> dict[str, Any]:
         return {

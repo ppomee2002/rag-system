@@ -58,13 +58,15 @@ class CallRecord:
     server_eval: float | None = None
     error: str | None = None
     dispatch_key: list | None = None  # SchedulingGate 가 dispatch 할 때의 정책 key
+    output_text: str | None = None  # CallRecorder(record_texts=True) 일 때만 (품질 비교용)
 
 
 class CallRecorder:
     """query 하나의 호출 기록 (thread-safe). t0 는 동시 실행 query 끼리 공유한다."""
 
-    def __init__(self, t0: float | None = None):
+    def __init__(self, t0: float | None = None, record_texts: bool = False):
         self.t0 = time.perf_counter() if t0 is None else t0
+        self.record_texts = record_texts
         self._lock = threading.Lock()
         self._issued: dict[str, int] = {}
         self.calls: list[CallRecord] = []

@@ -8,8 +8,10 @@
 - Ollama mock: `/api/chat`, `/api/version`, `/api/tags`, `/api/ps`.
 """
 
+import itertools
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -28,12 +30,30 @@ class MockServer:
         api_key: str | None = None,
         sched_policy: str = "fcfs",
         model: str = "mock-model",
+        fcfs_rejects_priority: bool = True,
+        slots: int | None = None,
+        service_time: float = 0.0,
+        reset_success: bool = True,
     ):
+        """slots 를 주면 내부 스케줄러가 동시 처리 수를 제한하고 대기 요청을
+        sched_policy 에 따라 (fcfs: 도착 순, priority: (priority, 도착) 순) 처리한다.
+        fcfs_rejects_priority=False 는 vLLM 0.33.0 소스 동작
+        (FCFS 서버가 priority 를 무시하고 수락).
+        """
         self.kind = kind
         self.responder = responder
         self.api_key = api_key
         self.sched_policy = sched_policy
         self.model = model
+        self.fcfs_rejects_priority = fcfs_rejects_priority
+        self.slots = slots
+        self.service_time = service_time
+        self.reset_success = reset_success
+        self._cv = threading.Condition()
+        self._waiting: list[tuple] = []
+        self._busy = 0
+        self._seq = itertools.count()
+        self.start_order: list[dict] = []
         self.requests: list[dict] = []
         self.n_chat = 0
         server = self
@@ -80,7 +100,10 @@ class MockServer:
                     if self.path == "/metrics":
                         text = (
                             "# HELP vllm:num_requests_running x\n"
-                            f'vllm:num_requests_running{{model_name="{server.model}"}} 0.0\n'
+                            f'vllm:num_requests_running{{model_name="{server.model}"}} '
+                            f"{float(server._busy)}\n"
+                            f'vllm:num_requests_waiting{{model_name="{server.model}"}} '
+                            f"{float(len(server._waiting))}\n"
                             f'vllm:num_preemptions_total{{model_name="{server.model}"}} 0.0\n'
                             f'vllm:request_queue_time_seconds_sum{{model_name="{server.model}"}} '
                             f"{0.01 * server.n_chat}\n"
@@ -125,7 +148,7 @@ class MockServer:
                 if server.kind == "vllm" and self.path == "/v1/chat/completions":
                     return self._vllm_chat(body)
                 if server.kind == "vllm" and self.path == "/reset_prefix_cache":
-                    return self._send(200, {})
+                    return self._send(200, {"success": server.reset_success})
                 if server.kind == "ollama" and self.path == "/api/chat":
                     server.n_chat += 1
                     prompt = body["messages"][-1]["content"]
@@ -152,8 +175,16 @@ class MockServer:
             def _vllm_chat(self, body):
                 if not self._authorized():
                     return self._send(401, {"error": "Unauthorized"})
-                if body.get("priority", 0) != 0 and server.sched_policy != "priority":
+                prio = body.get("priority", 0)
+                if prio != 0 and server.sched_policy != "priority" and server.fcfs_rejects_priority:
                     return self._send(400, {"error": {"message": "priority not enabled (mock)"}})
+                ticket = server._acquire(prio, body)
+                try:
+                    return self._vllm_chat_inner(body)
+                finally:
+                    server._release(ticket)
+
+            def _vllm_chat_inner(self, body):
                 server.n_chat += 1
                 prompt = body["messages"][-1]["content"]
                 text = server.responder(prompt)
@@ -164,6 +195,7 @@ class MockServer:
                 }
                 rid = f"chatcmpl-{server.n_chat}"
                 if not body.get("stream"):
+                    time.sleep(server._service(body))
                     return self._send(
                         200,
                         {
@@ -199,6 +231,7 @@ class MockServer:
                             ],
                         }
                     )
+                time.sleep(server._service(body))
                 emit({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
                 if (body.get("stream_options") or {}).get("include_usage"):
                     emit({**base, "choices": [], "usage": usage})
@@ -208,6 +241,30 @@ class MockServer:
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def _service(self, body) -> float:
+        return self.service_time * max(1.0, (body.get("max_tokens") or 64) / 64)
+
+    def _acquire(self, priority: int, body: dict):
+        if self.slots is None:
+            return None
+        with self._cv:
+            key = (priority if self.sched_policy == "priority" else 0, next(self._seq))
+            self._waiting.append(key)
+            while not (self._busy < self.slots and min(self._waiting) == key):
+                self._cv.wait()
+            self._waiting.remove(key)
+            self._busy += 1
+            prompt = body["messages"][-1]["content"]
+            self.start_order.append({"priority": priority, "seq": key[1], "prompt": prompt[:40]})
+            return key
+
+    def _release(self, key) -> None:
+        if key is None:
+            return
+        with self._cv:
+            self._busy -= 1
+            self._cv.notify_all()
 
     @property
     def url(self) -> str:
