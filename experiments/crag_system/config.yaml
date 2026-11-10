@@ -56,6 +56,9 @@ crag:
     replay_from_runs: []        # provider=replay: 이전 run 폴더 (web_cache.jsonl 사용)
     latency_mode: recorded      # replay: recorded (기록된 지연) | zero
     replay_fallback: false      # replay miss 시 실제 Tavily 호출 여부
+    replay_key: query           # query: rewrite 문자열 일치 | query_id: 기준 run 의 같은 질문 기록
+                                #   (정책 비교 등 같은 검색 결과가 필요하면 query_id)
+    replay_on_miss: error       # error | empty (기록 없음 -> 검색 결과 0개, run_end 에 집계)
 
 grading:
   strategy: full                # full | lazy_hit | lazy_rest | batch | adaptive

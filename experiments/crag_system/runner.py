@@ -186,13 +186,13 @@ def apply_split(cfg: dict, pool: list[QAExample]) -> list[QAExample]:
 def load_trace(run_dir: str | Path) -> list[dict]:
     """runner 결과 폴더 -> calls 를 붙인 query 행 (warmup / 오류 제외)."""
     run_dir = Path(run_dir)
+    from rag.retrieval.web_cache import read_jsonl  # 줄바꿈 기준 (splitlines 오분할 방지)
+
     calls: dict[int, list] = {}
-    for line in (run_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines():
-        c = json.loads(line)
+    for c in read_jsonl(run_dir / "calls.jsonl"):
         calls.setdefault(c["request_index"], []).append(c)
     rows = []
-    for line in (run_dir / "queries.jsonl").read_text(encoding="utf-8").splitlines():
-        r = json.loads(line)
+    for r in read_jsonl(run_dir / "queries.jsonl"):
         if r.get("warmup") or r.get("error"):
             continue
         rows.append({**r, "calls": calls.get(r["request_index"], [])})
@@ -228,7 +228,11 @@ def replay_sources(wcfg: dict) -> list[Path]:
 
 
 def build_web_search(cfg: dict, run_dir: Path):
-    from rag.retrieval.web_cache import RecordingWebSearch, ReplayWebSearch
+    from rag.retrieval.web_cache import (
+        RecordingWebSearch,
+        ReplayWebSearch,
+        load_replay_index,
+    )
 
     wcfg = cfg["crag"]["web_search"]
 
@@ -245,8 +249,22 @@ def build_web_search(cfg: dict, run_dir: Path):
         fallback = tavily() if wcfg.get("replay_fallback") else None
         if fallback is not None and wcfg.get("record"):
             fallback = RecordingWebSearch(fallback, run_dir / "web_cache.jsonl")
+        key_mode = wcfg.get("replay_key", "query")
+        index = None
+        if key_mode == "query_id":
+            runs = wcfg.get("replay_from_runs") or []
+            if not runs:
+                raise ValueError(
+                    "replay_key=query_id 에는 crag.web_search.replay_from_runs 가 필요"
+                )
+            index = load_replay_index(runs)
         return ReplayWebSearch(
-            replay_sources(wcfg), wcfg.get("latency_mode", "recorded"), fallback=fallback
+            replay_sources(wcfg),
+            wcfg.get("latency_mode", "recorded"),
+            fallback=fallback,
+            key_mode=key_mode,
+            on_miss=wcfg.get("replay_on_miss", "error"),
+            query_index=index,
         )
     raise ValueError(f"지원하지 않는 web_search provider: {provider}")
 
@@ -465,7 +483,11 @@ class Runner:
             "start_lag": None if arrival is None else t_start - arrival,
         }
         try:
-            res = self._run_pipeline(ex, llm, grader_llm, q)
+            web = self.comp.web_search
+            web = web.bind(ex.id) if hasattr(web, "bind") else web  # replay: 요청별 query_id
+            res = self._run_pipeline(ex, llm, grader_llm, q, web)
+            if getattr(web, "last", None):
+                row["web_replay"] = dict(web.last)
             d = asdict(res)
             d["contexts"] = [c["id"] for c in d["contexts"]]
             row.update(d)
@@ -492,9 +514,10 @@ class Runner:
             self.rows.append(row)
         return row
 
-    def _run_pipeline(self, ex, llm, grader_llm, q):
+    def _run_pipeline(self, ex, llm, grader_llm, q, web=None):
+        web = web or self.comp.web_search
         if self.pipeline_name == "crag_graph":
-            return self.graph.run(ex, llm=llm, grader_llm=grader_llm, query_state=q)
+            return self.graph.run(ex, llm=llm, grader_llm=grader_llm, query_state=q, web_search=web)
         retriever = QueryRetriever(self.comp.retriever, q)
         if self.pipeline_name == "vanilla":
             return VanillaRAG(retriever, llm, top_k=self.top_k).run(ex)
@@ -502,7 +525,7 @@ class Runner:
         return CRAG(
             retriever,
             llm,
-            self.comp.web_search,
+            web,
             grader_llm=grader_llm,
             top_k=self.top_k,
             web_top_k=self.web_top_k,

@@ -49,6 +49,9 @@ class RunContext:
     grader_llm: LLM
     timer: StageTimer
     query_state: Any = None  # rag.scheduling.state.QueryState (duck typing)
+    web_search: Any = (
+        None  # 요청별 WebSearch (예: query_id 에 묶인 replay). None 이면 그래프 기본값
+    )
 
 
 def _ctx(config) -> RunContext:
@@ -129,7 +132,8 @@ class CRAGGraph:
         ctx = _ctx(config)
         _enter(ctx, "web_search")
         with ctx.timer.stage("web_search"):
-            web_docs = self.web_search.search(state["rewritten"].strip(), self.web_top_k)
+            web = ctx.web_search or self.web_search
+            web_docs = web.search(state["rewritten"].strip(), self.web_top_k)
         contexts = web_docs if state["action"] == "incorrect" else state["contexts"] + web_docs
         return {"web_docs": web_docs, "contexts": contexts}
 
@@ -170,6 +174,7 @@ class CRAGGraph:
         llm: LLM | None = None,
         grader_llm: LLM | None = None,
         query_state: Any = None,
+        web_search: Any = None,
     ) -> PipelineResult:
         llm = llm or self.llm
         ctx = RunContext(
@@ -177,6 +182,7 @@ class CRAGGraph:
             grader_llm=grader_llm or self.grader_llm or llm,
             timer=StageTimer(),
             query_state=query_state,
+            web_search=web_search,
         )
         with stopwatch() as sw:
             out = self.graph.invoke({"question": ex.question}, {"configurable": {"ctx": ctx}})
