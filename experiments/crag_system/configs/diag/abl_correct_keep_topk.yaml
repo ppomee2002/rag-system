@@ -1,0 +1,3 @@
+# Ablation B: Correct 판정이어도 upper 미만 문서를 지우지 않고 top-k 유지 (run_ablation.py 로만 실행)
+ablation:
+  correct_keep_topk: true

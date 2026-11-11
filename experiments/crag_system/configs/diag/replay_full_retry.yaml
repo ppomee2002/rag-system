@@ -1,0 +1,16 @@
+# 진단 실험 공통 (PRE-DIAG / PRE-ABL): 기존 FULL-RETRY 의 web 기록을 질문 (query_id) 기준으로 재생.
+# Tavily 를 호출하지 않는다. --config 에 FULL-RETRY 의 config.yaml 을 주고 이 overlay 를 얹는다.
+# 경로는 repo 루트 기준 (서버에서 repo 루트에서 실행).
+crag:
+  web_search:
+    provider: replay
+    replay_from_runs:
+      - results/crag_system/smoke/SMOKE-A1-FULL-RETRY/20261110_111726
+    replay_paths: []
+    replay_key: query_id        # rewrite 문장이 달라도 같은 질문의 기록 문서를 사용 (불일치 수는 기록)
+    replay_on_miss: error       # 기록 없는 질문 -> 오류 행 (조용히 빈 결과로 진행하지 않음)
+    replay_fallback: false      # Tavily 대체 호출 없음
+    latency_mode: recorded      # 기록된 web 지연을 재현
+    record: false
+run:
+  purpose: pre

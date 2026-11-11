@@ -1,0 +1,3 @@
+# Ablation A: Incorrect 판정이어도 FAISS top-k 유지 + web 문서 추가 (run_ablation.py 로만 실행)
+ablation:
+  incorrect_keep_faiss: true
