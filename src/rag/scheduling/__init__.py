@@ -16,6 +16,7 @@ from rag.scheduling.policies import (
     Policy,
     SJFPred,
     SRPTEst,
+    SRPTNoPath,
     WaitThreshold,
     build_policy,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "QueryState",
     "SJFPred",
     "SRPTEst",
+    "SRPTNoPath",
     "SchedulingGate",
     "WaitThreshold",
     "build_policy",

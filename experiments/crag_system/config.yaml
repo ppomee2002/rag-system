@@ -67,7 +67,7 @@ grading:
   # adaptive: probe_k: 1, rest_mode: batch, skip_below_retrieval: null, early_incorrect_retrieval: null
 
 scheduler:
-  policy: none                  # none | fcfs | fcfs_query | sjf_pred | srpt_est
+  policy: none                  # none | fcfs | fcfs_query | sjf_pred | srpt_nopath | srpt_est
   slots: 1                      # 동시 전송 수 K (null = 제한 없음)
   aging_alpha: 0.0
   wait_threshold: null          # 초. aging 과 함께 쓰지 않음

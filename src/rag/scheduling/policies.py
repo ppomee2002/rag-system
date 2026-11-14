@@ -15,6 +15,11 @@ simulator.py `fill`):
   srpt_est  : 호출마다 "현재 stage 에서 남은 작업량" 을 다시 추정한다.
               grading 후 correction 경로면 rewrite + correction 후 generation,
               아니면 generation 비용만 남는다.
+  srpt_nopath : (ablation) srpt_est 에서 grading 결과 (실행 경로) 정보만 뺀 것.
+              grade / generate 호출은 srpt_est 와 같고, rewrite 호출 (= correction 경로가 확정된 뒤
+              첫 호출) 만 경로와 무관한 기대값 pred_post(feats) 를 쓴다.
+              sjf_pred -> srpt_nopath : 진행 (남은 grade 수, 현재 호출 prompt 길이) 정보의 효과
+              srpt_nopath -> srpt_est : grading 결과 (correction 경로) 정보의 효과
 
 정책은 `CallTicket.query` (= `PolicyView`) 로 정책 입력 필드만 읽는다 (rag.scheduling.state).
 cost model 은 `model.for_query(query_id)` 로 고른다 (OOF 모델이면 자기 fold 를 뺀 모델).
@@ -32,7 +37,7 @@ from dataclasses import dataclass, field
 from rag.scheduling.cost_model import CostModel, OOFCostModel, features
 from rag.scheduling.state import PolicyView, QueryState
 
-POLICY_NAMES = ("fcfs", "fcfs_query", "sjf_pred", "srpt_est")
+POLICY_NAMES = ("fcfs", "fcfs_query", "sjf_pred", "srpt_nopath", "srpt_est")
 
 
 @dataclass
@@ -141,6 +146,25 @@ class SRPTEst(Policy):
         return {"name": self.name, "cost_model": _model_meta(self.model)}
 
 
+class SRPTNoPath(SRPTEst):
+    """Ablation: srpt_est 와 같되 rewrite 호출의 추정치에서 correction 경로 정보를 뺀다.
+
+    srpt_est 에서 grading 결과가 추정치에 들어가는 곳은 rewrite 호출 하나뿐이다
+    (rewrite_mean + gen_corrected_mean). 여기서는 그 값을 grading 전과 같은 기대값
+    pred_post(feats) (경로를 모르는 grading 이후 작업량 예측) 로 바꾼다.
+    generate 호출은 마지막 호출이라 경로와 관계없이 남은 작업이 generation 하나이므로 그대로 둔다
+    (prompt 길이는 호출 시점에 관측되는 값. correction 경로면 web 문서만큼 길어질 수 있음).
+    """
+
+    name = "srpt_nopath"
+
+    def base(self, t):
+        if t.kind == "rewrite":
+            q = t.query
+            return self.model.for_query(q.query_id).pred_post(_feats(q))
+        return super().base(t)
+
+
 class _Wrapper(Policy):
     dynamic = True
 
@@ -188,7 +212,7 @@ class WaitThreshold(_Wrapper):
 def build_policy(cfg: dict, cost_model: CostModel | OOFCostModel | None = None) -> Policy:
     """config `scheduler:` -> 정책.
 
-    policy: fcfs | fcfs_query | sjf_pred | srpt_est
+    policy: fcfs | fcfs_query | sjf_pred | srpt_nopath | srpt_est
     aging_alpha: 0 이 아니면 Aging 적용
     wait_threshold: 지정하면 대기 임계값 적용 (Aging 과 동시 사용 불가, 원본과 같음)
     """
@@ -197,10 +221,11 @@ def build_policy(cfg: dict, cost_model: CostModel | OOFCostModel | None = None) 
         policy: Policy = FCFS()
     elif name == "fcfs_query":
         policy = FCFSQuery()
-    elif name in ("sjf_pred", "srpt_est"):
+    elif name in ("sjf_pred", "srpt_nopath", "srpt_est"):
         if cost_model is None:
             raise ValueError(f"{name} 는 cost_model 이 필요 (scheduler.cost_model)")
-        policy = SJFPred(cost_model) if name == "sjf_pred" else SRPTEst(cost_model)
+        cls = {"sjf_pred": SJFPred, "srpt_nopath": SRPTNoPath, "srpt_est": SRPTEst}[name]
+        policy = cls(cost_model)
     elif name == "correction_aware":
         raise NotImplementedError(
             "correction_aware 는 정의 확정 후 구현 예정 (experiments/crag_system/README.md)"

@@ -339,3 +339,20 @@ def test_job_from_row_and_fit():
     assert job_from_row(wall_rows[0], service_key="wall").work == pytest.approx(4.5)
     with pytest.raises(ValueError):
         job_from_row(wall_rows[0])
+
+
+def test_srpt_nopath_differs_only_on_rewrite():
+    from rag.scheduling import SRPTNoPath
+
+    q = QueryState("a", n_docs=5, retrieval_scores=[0.5] * 5, retrieval_chars=[100] * 5)
+    full, nopath = SRPTEst(model()), SRPTNoPath(model())
+    for kind, idx, chars in [("grade", 0, 100), ("grade", 4, 300), ("generate", 0, 50)]:
+        t = CallTicket(q, kind, idx, chars, 0.0, 0)
+        assert nopath.base(t) == pytest.approx(full.base(t))
+    rw = CallTicket(q, "rewrite", 0, 50, 0.0, 1)
+    assert full.base(rw) == pytest.approx(0.5 + 3.0)  # rewrite_mean + gen_corrected_mean
+    assert nopath.base(rw) == pytest.approx(2.0)  # pred_post (경로 무관 기대값)
+    p = build_policy({"policy": "srpt_nopath"}, model())
+    assert p.name == "srpt_nopath" and p.base_is_estimate
+    with pytest.raises(ValueError):
+        build_policy({"policy": "srpt_nopath"})

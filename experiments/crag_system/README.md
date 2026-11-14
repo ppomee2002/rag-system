@@ -228,6 +228,26 @@ done
   `PolicyView.corrected` 가 이미 제공된다 (현재 SRPT-est / SJF 는 corrected 를 쓰지 않음).
   `build_policy({"policy": "correction_aware"})` 는 지금은 NotImplementedError.
 
+## 스케줄링 검증 실험 SV (2026-11-14, 사용자 서버 실행)
+
+목적: 새 기법 추가가 아니라 "C-RAG 실행 상태 기반 client-side 스케줄링" 가설의 검증.
+
+| 실험 | 조건 | 질문 |
+|---|---|---|
+| A | sequential, eval split | 경로 (correction 여부) 별 LLM 호출 수·단계 시간·작업량 차이 |
+| B | `none` (gate 없음, vLLM FCFS) / `fcfs` K / `srpt_est` K, 같은 workload | gate 자체 효과·부작용, 정책 추가 효과 |
+| C | `fcfs` / `fcfs_query` / `sjf_pred` / `srpt_nopath` / `srpt_est` | 상태 정보의 단계별 기여 |
+
+C 의 ablation 사다리 (정책 코드: `rag.scheduling.policies`):
+- `fcfs` → `fcfs_query`: 스케줄링 단위를 호출에서 요청 (query) 으로 (작업량 정보 없음)
+- `fcfs_query` → `sjf_pred`: retrieval 직후 예측한 요청 전체 작업량 (정적)
+- `sjf_pred` → `srpt_nopath`: 진행 상태 (남은 grade 수, 현재 호출 prompt 길이)
+- `srpt_nopath` → `srpt_est`: grading 결과 (correction 경로). 두 정책은 rewrite 호출 추정치만 다르다
+
+실행: `bash experiments/crag_system/run_sched_validation.sh train seq calib workloads live analyze`
+(환경 변수·단계 설명은 스크립트 상단). 분석: `analyze_sched_validation.py` (+ `diag_sched.py`).
+결과: `results/crag_system/pre/PRE-<TAG>-{TRAIN,A,LIVE}/`, `results/crag_system/analysis/<TAG>-*/`.
+
 ## 실제 GPU 에서 검증해야 하는 것
 
 | 항목 | 이유 | 확인 방법 |
