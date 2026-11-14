@@ -150,10 +150,18 @@ live_one() {
   wl=$(wl_path "$rho" "$s")
   [[ "$DRY_RUN" == 1 ]] || need "$wl" workloads
   run_id="rho${rho}_s${s}_${pol}_K${k}"
+  local dir="$LIVE_ROOT/$run_id"
+  if [[ -f "$dir/summary.json" ]]; then
+    echo "완료됨, 건너뜀: $dir"; return 0
+  elif [[ -e "$dir" ]]; then
+    echo "중단된 run 폴더가 있음 (덮어쓰지 않음): $dir" >&2
+    echo "  확인 후 이름을 바꾸고 (mv $dir $dir.partial_\$(date +%H%M%S)) 다시 실행" >&2
+    exit 1
+  fi
   local extra=()
   [[ "$pol" != none ]] && extra+=(--set "scheduler.cost_model={path: $COST_MODEL}")
   [[ "$RESET_PREFIX_CACHE" == 1 ]] && extra+=(--set run.reset_prefix_cache=true)
-  with_gpu_log "$LIVE_ROOT/$run_id" uv run python experiments/crag_system/run.py "${COMMON[@]}" \
+  with_gpu_log "$dir" uv run python experiments/crag_system/run.py "${COMMON[@]}" \
     --exp-id "PRE-$TAG-LIVE" --run-id "$run_id" --workload "$wl" \
     --set run.mode=live --set dataset.split.part=eval "${REPLAY[@]}" \
     --set crag.web_search.latency_mode=recorded \
