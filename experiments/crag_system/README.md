@@ -248,6 +248,34 @@ C 의 ablation 사다리 (정책 코드: `rag.scheduling.policies`):
 (환경 변수·단계 설명은 스크립트 상단). 분석: `analyze_sched_validation.py` (+ `diag_sched.py`).
 결과: `results/crag_system/pre/PRE-<TAG>-{TRAIN,A,LIVE}/`, `results/crag_system/analysis/<TAG>-*/`.
 
+## 상태 기반 비용 예측 ablation / 동일 유효 부하 live (2026-11-18)
+
+두 가설을 따로 검증한다. 새 스케줄링 정책은 구현하지 않는다.
+
+Phase 1 (GPU 없음) `cost_state_ablation.py`: 남은 LLM 작업량 예측만 비교 (지연 개선 주장 아님)
+- M0 기존 SRPT-est (`est_remaining`, 실제 `SRPTEst.base` 와 대조) / M1 stage 평균 /
+  M2s grading 관측 점수로 P(action) 갱신 / M2 + evidence 정책별 generation prompt 길이 기대값
+- 학습은 SV1 train trace 만, 추정 입력은 `Obs` (그 시점 관측 가능한 값) 만
+- 평가: seq (crag_rule) + EVC 측정 (정책별 generation), 선택적으로 live 대기열의 결정 차이
+
+```bash
+uv run python experiments/crag_system/cost_state_ablation.py \
+  --train results/crag_system/pre/PRE-SV1-TRAIN/train --seq results/crag_system/pre/PRE-SV1-A/eval_seq \
+  --cost-model results/crag_system/cost_models/SV1_train_wall.json \
+  --evc-seq results/crag_system/pre/PRE-EVC-SV1-SEQ/<ts> \
+  --live-root results/crag_system/pre/PRE-EVC-SV1-LIVE --live-root results/crag_system/pre/PRE-SV1-LIVE \
+  --name SV1-cost-state --quiet
+```
+
+Phase 2 (GPU, 사용자 서버) `equal_load.py` + `run_equal_load.sh`: 기존 workload 의 도착 시각에
+s = ρ x F / target 을 곱해 정책별로 같은 추정 유효 부하를 만든다 (질문·순서·seed 동일, 같은 seed 로
+rate = λ/s 재생성한 것과 일치하는지 check 에서 대조). 결과 `PRE-EQL1-LIVE/rho<명목ρ>_s<seed>_<정책>_K4`.
+
+```bash
+WORK_RATIO=1.513 bash experiments/crag_system/run_equal_load.sh make check   # DRY_RUN=1 로 명령만 확인
+WORK_RATIO=1.513 bash experiments/crag_system/run_equal_load.sh live report diag
+```
+
 ## 실제 GPU 에서 검증해야 하는 것
 
 | 항목 | 이유 | 확인 방법 |
