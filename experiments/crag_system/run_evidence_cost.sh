@@ -12,6 +12,7 @@
 #   report       [측정] 반영 보고서 (LLM 호출 없음)
 #   live         (GPU, 이번 단계에서는 실행하지 않음) LIVE_POLICIES 를 SV1 workload 로 실행
 #   live-report  live 결과: 정확도 + 지연 + 처리량 + GPU (evidence_cost live-report, analyze_sched_validation)
+#   diag         live 정합성·지연 분해·queueing·scheduling 진단 (diag_evc_live.py, LLM 호출 없음)
 #
 # 환경 변수 (기본값)
 #   EVF               필수. evidence_filter_ablation 생성 run 폴더
@@ -171,11 +172,22 @@ stage_live_report() {
   done
 }
 
-[[ $# -ge 1 ]] || { sed -n '2,28p' "$0"; exit 1; }
+stage_diag() {
+  local m=${MEAS:-$(latest_meas)} cal
+  local args=(--live-root "$LIVE_ROOT" --seq "$SEQ_DIR" --evf "$EVF" --k "$K_MAIN" --name "$TAG-live-diag")
+  [[ -n "$m" ]] && args+=(--evc-seq "$m")
+  [[ -d "$PRE/PRE-$SV_TAG-LIVE" ]] && args+=(--sv-live-root "$PRE/PRE-$SV_TAG-LIVE")
+  cal=$(ls -td "$PRE"/PRE-K/*_calibration 2>/dev/null | head -1 || true)
+  [[ -n "$cal" && -f "$cal/calibration.json" ]] && args+=(--calib "$cal/calibration.json")
+  run uv run python experiments/crag_system/diag_evc_live.py "${args[@]}" --quiet
+}
+
+[[ $# -ge 1 ]] || { sed -n '2,29p' "$0"; exit 1; }
 for st in "$@"; do
   case "$st" in
     check | estimate | measure | report | live) "stage_$st" ;;
     live-report) stage_live_report ;;
+    diag) stage_diag ;;
     *) echo "알 수 없는 stage: $st" >&2; exit 1 ;;
   esac
 done
