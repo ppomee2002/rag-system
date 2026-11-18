@@ -276,6 +276,29 @@ WORK_RATIO=1.513 bash experiments/crag_system/run_equal_load.sh make check   # D
 WORK_RATIO=1.513 bash experiments/crag_system/run_equal_load.sh live report diag
 ```
 
+## 상태 기반 SRPT-est (M2) GPU scheduling 검증 SST1 (2026-11-18)
+
+기존 정책·cost model·CRAGGraph·EQL1 결과는 바꾸지 않는다 (신규 파일만).
+
+- `state_sched.py`: `srpt_state` 정책 (= cost_state_ablation 의 M2 를 gate base 로) + `fit` (train trace
+  -> M2 표 json) + `check` (live 전 점검). `srpt_est` 는 값이 기존 SRPTEst 와 같고 M2 를 그림자로 기록만.
+  추정치는 각 호출의 gate enqueue 때 한 번 (grade i: grade 0..i-1 점수만 / rewrite: action 확정 /
+  generate: 실제 prompt 길이 -> M0 = M2). 문서별 점수는 `GradeTap` (grader LLM 래퍼) 이 기록 —
+  코어 `QueryState` 는 바꾸지 않음. full sequential grading 만 허용, aging 없음, K 그대로.
+- `run_state_sched.py`: EvidenceRunner 하위 클래스. 결과 폴더에 `state_estimates.jsonl` (호출별 M0 / M2 /
+  사용값), `scheduler_overhead.json`, `state_check.json` (tap 점수 = 결과 점수) 를 추가로 쓴다.
+- `state_sched_analysis.py expect` (Part A, live 전): EQL1 fcfs_query 대기열의 결정 차이 + trace replay
+  시뮬레이션 (감속률은 fcfs_query run 에서 in-sample 추정, 보정 오차 함께 보고) + 검증 목표.
+  `report` (Part D): 정책별 지표, seed 층화 paired bootstrap, 개선율, 결정 변경률, overhead, 환경 차이.
+- `run_state_sched.sh`: live 인자는 `run_equal_load.sh live` 와 같고 runner·scheduler·state model 만 다름
+  (테스트로 대조). 결과 `PRE-SST1-LIVE-<srpt_est|srpt_state>/rho<명목ρ>_s<seed>_keep_all_K4`.
+
+```bash
+bash experiments/crag_system/run_state_sched.sh fit expect check   # GPU 불필요
+DRY_RUN=1 bash experiments/crag_system/run_state_sched.sh live      # 명령 확인
+bash experiments/crag_system/run_state_sched.sh live report
+```
+
 ## 실제 GPU 에서 검증해야 하는 것
 
 | 항목 | 이유 | 확인 방법 |
