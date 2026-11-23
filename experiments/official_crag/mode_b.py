@@ -24,8 +24,11 @@ from rag.crag_official import source as off_source
 from rag.crag_official.completion_engine import build_generator_engine
 from rag.crag_official.evaluator import build_evaluator, weights_fingerprint
 from rag.evidence.budget import build_budget
-from rag.evidence.frozen import load_frozen
+from rag.evidence.doc_log import doc_rows, t5_doc_token_counter
+from rag.evidence.doc_log import write_csv as write_doc_csv
+from rag.evidence.frozen import file_sha256, load_frozen
 from rag.evidence.graders import LlamaPromptGrader, OfficialT5Grader
+from rag.evidence.manifest import build_manifest
 from rag.evidence.pipeline import ControlledCRAG, PipelineConfig
 from rag.evidence.policies import get_policy
 from rag.evidence.schema import SCHEMA_VERSION, validate_record
@@ -78,17 +81,26 @@ def build_web_search(cfg: dict, run_dir: Path):
 
     w = cfg.get("web_search") or {}
     provider = w.get("provider", "replay")
+    query_mode = (cfg.get("correction") or {}).get("query_mode", "legacy_rewrite")
 
     def tavily():
         from rag.retrieval.tavily_search import TavilyWebSearch
 
-        return TavilyWebSearch(search_depth=w.get("search_depth", "basic"))
+        return TavilyWebSearch(
+            search_depth=w.get("search_depth", "basic"),
+            include_raw_content=bool(w.get("include_raw_content", False)),
+        )
+
+    def recorder(ws):
+        return RecordingWebSearch(
+            ws, run_dir / "web_cache.jsonl", "tavily", ws.params(), query_mode
+        )
 
     if provider == "none":
         return None
     if provider == "tavily":
         ws = tavily()
-        return RecordingWebSearch(ws, run_dir / "web_cache.jsonl") if w.get("record") else ws
+        return recorder(ws) if w.get("record") else ws
     if provider == "replay":
         paths = [Path(p) for p in w.get("replay_paths") or []]
         runs = w.get("replay_from_runs") or []
@@ -104,12 +116,30 @@ def build_web_search(cfg: dict, run_dir: Path):
         index = load_replay_index(runs) if key_mode == "query_id" else None
         if key_mode == "query_id" and not runs:
             raise ValueError("replay_key=query_id 에는 replay_from_runs 필요")
+        on_miss = w.get("replay_on_miss", "error")
+        fallback = None
+        if on_miss == "live":  # miss 면 실제 검색 + 이 run 의 web_cache.jsonl 에 v2 기록
+            fallback, on_miss = recorder(tavily()), "error"
+        expect = None
+        if key_mode == "query_strict":
+            from rag.retrieval.tavily_search import tavily_params
+
+            expect = {
+                "provider": w.get("replay_provider", "tavily"),
+                "params": tavily_params(
+                    w.get("search_depth", "basic"), w.get("include_raw_content", False)
+                ),
+                "query_mode": query_mode,
+            }
         return ReplayWebSearch(
             paths,
             w.get("latency_mode", "recorded"),
+            fallback=fallback,
             key_mode=key_mode,
-            on_miss=w.get("replay_on_miss", "error"),
+            on_miss=on_miss,
             query_index=index,
+            expect=expect,
+            accept_legacy=bool(w.get("accept_legacy_records", False)),
         )
     raise ValueError(f"web_search.provider: replay | tavily | none (got {provider})")
 
@@ -284,6 +314,13 @@ class ModeBRunner:
             )
         self.queries = JsonlWriter(self.run_dir / "queries.jsonl")
         self.calls = JsonlWriter(self.run_dir / "calls.jsonl")
+        self.grading_docs = JsonlWriter(self.run_dir / "grading_docs.jsonl")
+        self.doc_tokens, self.doc_tokenizer = (
+            t5_doc_token_counter(components.evaluator)
+            if components.evaluator is not None
+            else (None, None)
+        )
+        self.doc_rows: list[dict] = []
         self.rows: list[dict] = []
         self.lock = threading.Lock()
 
@@ -375,14 +412,57 @@ class ModeBRunner:
         for c in calls:
             self.calls.write({"request_index": req["i"], "question_id": item.question_id, **c})
         self.queries.write(row)
+        # 문서별 grading 로그 (측정 구간 밖. 기록된 값만 펼침 + T5 문서 토큰 수)
+        drows = doc_rows(row, item.docs, self.doc_tokens, self.doc_tokenizer)
+        for d in drows:
+            self.grading_docs.write(d)
         with self.lock:
             self.rows.append(row)
+            self.doc_rows += drows
         return row
+
+    def _manifest(self) -> dict:
+        ev = self.comp.evaluator
+        ws = self.comp.web_search
+        web = None
+        if ws is not None:
+            web = {**(self.cfg.get("web_search") or {})}
+            web["stats_at_start"] = ws.stats() if hasattr(ws, "stats") else None
+            paths = getattr(ws, "paths", None) or []
+            web["cache_files"] = [
+                {"path": p, "sha256": file_sha256(p) if Path(p).is_file() else None} for p in paths
+            ]
+        here = Path(__file__).resolve().parent
+        return build_manifest(
+            {**self.cfg, "experiment_mode": "B_controlled"},
+            self.input_info,
+            [it.question_id for it in self.items],
+            self.pipeline.describe(),
+            ev.describe() if ev is not None else None,
+            (
+                weights_fingerprint(
+                    ev.backend.model_path,
+                    full_hash=bool((self.cfg.get("manifest") or {}).get("full_weight_hash")),
+                )
+                if ev is not None and hasattr(ev.backend, "model_path")
+                else None
+            ),
+            web,
+            git_info(),
+            {
+                f: file_sha256(here / f) if (here / f).is_file() else None
+                for f in ("mode_b.py", "analyze.py", "analyze_correction.py")
+            },
+        )
 
     def run(self) -> Path:
         engines = {"generator": self.comp.engine}
         write_run_files(
             self.run_dir, self.cfg, collect_run_metadata(self.cfg, engines, self._meta_extra())
+        )
+        write_new(
+            self.run_dir / "manifest.json",
+            json.dumps(self._manifest(), indent=2, ensure_ascii=False, default=str),
         )
         t0 = time.perf_counter()
         for i, it in enumerate(self.warmup):
@@ -402,7 +482,16 @@ class ModeBRunner:
                 threads.append(th)
             for th in threads:
                 th.join()
+        write_doc_csv(self.doc_rows, self.run_dir / "grading_docs.csv")
         summary = summarize(self.rows)
+        summary["grading_docs"] = {
+            "n_rows": len(self.doc_rows),
+            "n_evaluated": sum(bool(d["evaluated"]) for d in self.doc_rows),
+            "timing_kind": {
+                k: sum(d["timing_kind"] == k for d in self.doc_rows)
+                for k in sorted({str(d["timing_kind"]) for d in self.doc_rows})
+            },
+        }
         ws = self.comp.web_search
         summary["web_search"] = ws.stats() if ws is not None and hasattr(ws, "stats") else None
         ev = self.comp.evaluator

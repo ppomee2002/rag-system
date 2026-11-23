@@ -303,12 +303,17 @@ uv run python experiments/official_crag/freeze_inputs.py \
 # 2) vLLM (기존 프로필, GPU0. scripts/server/README.md 의 vLLM 전용 venv 에서)
 CUDA_VISIBLE_DEVICES=0 python scripts/server/launch_vllm.py \
     --profile experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml
-# 3) smoke (10문항, 공식 T5 + 공식 정책)
+# 3) 공유 correction 검색 캐시 (모든 질문 1회 Tavily 검색, 9.3 절). 이후 C1/C2/C3 는 재생만
 export FROZEN=results/official_crag/inputs/popqa_c1_230.jsonl
-export REPLAY_RUN=results/crag_system/smoke/SMOKE-A1-FULL-RETRY/20261110_111726
+uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
+    --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
+    --set "inputs.frozen_path=$FROZEN" --name popqa230_legacy_rewrite
+export WEB_CACHE=results/official_crag/web_cache/popqa230_legacy_rewrite/web_cache.jsonl
+#    (기존 crag_system 기록을 쓰려면 WEB_CACHE 대신 REPLAY_RUN=<run 폴더>: 검색어가 같을 때만 재생)
+# 4) smoke (10문항, 공식 T5 + 공식 정책)
 CUDA_VISIBLE_DEVICES=1 EVAL_DEVICE=cuda:0 LIMIT=10 PURPOSE=smoke PREFIX=SMOKE-C1 ONLY="T5-OFF LL-RULE VAN" \
     bash experiments/official_crag/server/c1_matrix.sh
-# 4) 전체 C1 행렬 (pre) -> 분석
+# 5) 전체 C1 행렬 (pre) -> 분석 (C2 Correction 분석은 9.4 절)
 CUDA_VISIBLE_DEVICES=1 EVAL_DEVICE=cuda:0 PURPOSE=pre PREFIX=PRE-C1 bash experiments/official_crag/server/c1_matrix.sh
 uv run python experiments/official_crag/analyze.py results/official_crag/pre/PRE-C1-*/* \
     --baseline results/official_crag/pre/PRE-C1-VAN/<run_id> --name c1_pre
@@ -320,7 +325,7 @@ PAPER=--paper-approved` (git clean, `--limit` 없음 필요). GPU 1장만 쓸 �
 ```bash
 # vLLM 을 띄우기 전
 uv run --extra crag --extra official python experiments/official_crag/precompute_scores.py \
-    --set "inputs.frozen_path=$FROZEN" --set "web_search.replay_from_runs=[$REPLAY_RUN]" \
+    --set "inputs.frozen_path=$FROZEN" --set "web_search.replay_paths=[$WEB_CACHE]" \
     --set evaluator.device=cuda:0 --out results/official_crag/score_cache/popqa_c1_230_t5.jsonl
 # vLLM 을 띄운 뒤
 EVAL_BACKEND=cache EVAL_CACHE=results/official_crag/score_cache/popqa_c1_230_t5.jsonl \
@@ -330,7 +335,9 @@ EVAL_BACKEND=cache EVAL_CACHE=results/official_crag/score_cache/popqa_c1_230_t5.
 ### 6.5 결과·백업
 
 - MODE A: `results/official_crag/mode_a/<step>/<run_id>/` (scores.jsonl, preds.jsonl, preds.txt, summary.json)
-- MODE B: `results/official_crag/<purpose>/<exp_id>/<run_id>/` (config.yaml, run_meta.json, queries.jsonl, calls.jsonl, summary.json)
+- MODE B: `results/official_crag/<purpose>/<exp_id>/<run_id>/` (config.yaml, run_meta.json, manifest.json, queries.jsonl,
+  calls.jsonl, grading_docs.jsonl/.csv, summary.json [, web_cache.jsonl: tavily 기록 또는 replay_on_miss=live])
+- 공유 검색 캐시: `results/official_crag/web_cache/<name>/` (web_cache.jsonl, calls.jsonl, manifest.json)
 - 분석: `results/official_crag/analysis/<name>/`
 - 출처 기록: `results/official_crag/provenance/` (공식 commit, 가중치 sha256)
 - 백업 (핵심 CSV/JSON, 압축 jsonl, 고정 입력, provenance 만):
@@ -348,7 +355,7 @@ EVAL_BACKEND=cache EVAL_CACHE=results/official_crag/score_cache/popqa_c1_230_t5.
 | `CUDA out of memory` | `nvidia-smi` (vLLM·다른 사용자 점유), smoke `cuda_before` | 다른 GPU (`CUDA_VISIBLE_DEVICES`), `--device cpu`, 또는 캐시 방식 (5.2) |
 | vLLM 시작 실패 (memory) | T5 가 같은 GPU 에 먼저 올라감 | T5 를 다른 GPU/CPU 로, 또는 vLLM 을 먼저 띄우고 T5 는 다른 장치 |
 | `evaluator score cache miss` | 캐시 생성 때와 입력·replay 기록이 같은지 | 같은 `FROZEN`·`REPLAY_RUN` 으로 다시 precompute |
-| `web search replay_miss` | replay run 에 해당 질문 기록이 있는지 | `REPLAY_RUN` 확인, 필요 시 `web_search.replay_on_miss=empty` (기록은 invalid 로 남음) |
+| `web search replay_miss` | 행의 `correction.replay.miss_reason` (`query_mismatch` = 같은 질문인데 검색어가 기록과 다름, `search_condition_mismatch` = provider/params/query_mode 다름, `not_recorded`) | `WEB_CACHE` 가 같은 `correction.query_mode`·generator 로 만든 것인지 확인. 필요 시 `web_search.replay_on_miss=live` (실제 검색 + 기록) 또는 `empty` (invalid 로 남음) |
 | `고정 입력 검사 실패` | 메시지의 질문 id | ID 목록·기준 run·chunk 파일이 같은 데이터인지 |
 
 ---
@@ -374,6 +381,7 @@ engine_queue}, e2e_latency, prediction, ground_truth, is_correct, metrics{acc, e
 ### C2 — 중간 Grading 상태
 
 - 사용 모듈: `rag.evidence.state` (`GradingTracker`, `GradingSnapshot`), 결과의 `grading_events`, `grading_snapshots`.
+  문서별 로그 (`grading_docs.jsonl/.csv`), manifest, 공유 검색 캐시, Correction 분석은 **9 절**.
 - snapshot 필드: `n_evaluated, n_total, n_passed, n_partial, n_failed, cum_input_tokens, cum_output_tokens, cum_latency,
   passed_ids, partial_ids, evaluated_ids, provisional_action, action_final, first_pass_rank`.
 - **공식 판정과의 관계**: T5 점수는 문서별로 독립이라 prefix 점수는 전체 평가 때와 같다. `provisional_action=correct`
@@ -410,3 +418,131 @@ engine_queue}, e2e_latency, prediction, ground_truth, is_correct, metrics{acc, e
 - Holdout / 확장 평가 split (230문항 외): `freeze_inputs.py` 로 다른 ID 목록을 고정하면 같은 runner 로 실행 가능하나
   split 정의는 미정.
 - MODE B live 모드는 가짜 엔진 테스트만 통과 (vLLM 부하 검증은 서버).
+
+---
+
+## 9. C2 지원: 문서별 Grading 로그 · Manifest · 공유 검색 캐시 · Correction 분석
+
+공식 CRAG 구현·공식 판정 로직은 바꾸지 않았다. 아래는 모두 기존 기록을 펼치거나 (로그), 기존 재생 기능을 확장하거나
+(캐시), 결과를 읽기만 하는 (분석) 추가 기능이다.
+
+### 9.1 문서별 Grading 로그 (`grading_docs.jsonl` / `.csv`, `rag.evidence.doc_log`)
+
+grading 을 하는 MODE B run 마다 **질문 x 검색 문서 한 행**. 연결 키: `(request_id, eval_order)` →
+`queries.jsonl` 의 `grading_events[eval_order]`, `snapshot_index` → `grading_snapshots[snapshot_index]`
+(이 문서까지 평가한 뒤의 누적 상태). 검색 순서대로 평가 상태를 복원할 수 있다.
+
+| 필드 | official_t5 | legacy_llama (`llama_prompt`) |
+|---|---|---|
+| `run_id, request_id, query_id, doc_rank, doc_id, retrieval_score` | 공통 | 공통 |
+| `grader_type` | `official_t5` | `legacy_llama` (`grader_impl` = 기존 이름 `llama_prompt`) |
+| `grader_score` (판정 점수) | T5 회귀 logit, 빈 문서는 공식 규칙 -1.0 | GRADE 출력에서 파싱한 0~1 |
+| `t5_raw_logit` | 모델 (또는 캐시) logit. 규칙 점수면 null | null |
+| `llama_parsed_score` | null | 0~1 파싱 점수 |
+| `llama_yes_logprob` | null (`not_applicable`) | **null** (`not_extracted`): 기존 grader 는 logprobs 를 요청하지 않음. 0~1 점수로 대체하지 않음 |
+| `grader_flag / grader_pass / grader_decision` | 2/1/0, flag 2 만 true, pass/partial/fail | 같음 |
+| `decision_rule, threshold_upper/lower` | `score>=0.592 pass, >=-0.995 partial` + 질문 규칙 | 0.7 / 0.3 |
+| `document_tokens` | T5 토크나이저로 문서 단독 토큰 수 (정규화 후, `</s>` 포함). 캐시 backend 면 null | null (Llama 토크나이저 로컬에 없음) |
+| `grading_input_tokens` | T5 입력 (`질문 [SEP] 문서`) attention-mask 합. 판정 경로는 truncation 없음 → 실제 입력 전체 | 엔진 보고 prompt 토큰 |
+| `grading_output_tokens` | null (`regression_scalar_no_generated_tokens`) | 엔진 보고 생성 토큰 |
+| `grading_latency_ms` | 이번 run 의 문서 평가 wall | 같음 |
+| `grading_compute_ms, timing_kind, is_cache_replay` | `live_model` / `cache_replay` (compute 는 기록 당시 값) / `rule_no_model` / `mock` | `live_llm` |
+| `evaluated` | 평가 안 한 문서 (조기 중단) 는 false, **점수·시간·토큰 모두 null** | 같음 |
+| `provisional_action_after, action_final_after` | 이 문서까지의 판정·확정 여부 | 같음 |
+
+### 9.2 Experiment Manifest (`manifest.json`, `rag.evidence.manifest`)
+
+MODE B run 마다: dataset 경로·sha256, question ID 목록, 고정 Top-5 입력 파일·sha256 (+ docs·retriever·기준 run),
+prompt template 별 sha256 (사용한 것 + 전체, `version_sha256`), 공식 T5 가중치 fingerprint (파일 크기 + 작은 파일
+sha256, `manifest.full_weight_hash=true` 면 safetensors 전체), generator (model, `llm.revision`, api, temperature,
+top_p / `top_p_sent`, max_tokens, seed, generation prompt), grader threshold·판정 규칙, evidence 정책·budget,
+correction (query_mode, 검색 조건, 캐시 파일 sha256), 평가 스크립트 sha256 (`metrics.py`, `generation.py`),
+분석 스크립트 sha256, git commit/branch/dirty.
+
+- `comparison` / `comparison_sha256`: **정책 간에 같아야 하는 조건** (고정 입력, dataset, 질문 집합, generator,
+  web top_k, seed, `experiment_mode`). 정책·grader·budget 은 넣지 않는다. 같으면 같은 비교 조건.
+- `experiment_mode=B_controlled` 이고 `not_comparable_with=A_official_reproduction`. MODE A 는 공식 데이터·저자
+  지식 파일·completions API 를 쓰는 별도 설정이며 분석 스크립트가 섞지 않는다 (MODE A manifest 는 추가하지 않음,
+  `run_meta.json` 참고).
+- `llm.revision` 은 서버에서 직접 적어야 한다 (vLLM API 가 revision 을 주지 않음): `--set llm.revision=<snapshot hash>`.
+  chat API 엔진은 top_p 를 보내지 않으므로 `top_p_sent=null`.
+
+### 9.3 Correction 검색 캐시 공유 (`rag.retrieval.web_cache` v2 + `prefetch_web.py`)
+
+기존 Tavily Record/Replay (`RecordingWebSearch` / `ReplayWebSearch`) 를 확장했다 (별도 시스템 없음).
+
+- 기록 (`web_cache.v2`, v1 필드에 추가만): `query_id, query (실제 외부 검색어), provider, params (search_depth,
+  include_raw_content, top_k), query_mode, searched_at_utc, cache_version, docs, raw_response (Tavily 원본 응답;
+  `web_search.include_raw_content=true` 면 페이지 원문 포함), latency`.
+- 재생 `replay_key=query_strict` (official_crag 기본값으로 변경): `(query_id, 실제 검색어, top_k)` + 검색 조건
+  (provider, params, query_mode) 이 모두 같을 때만 hit. **같은 query_id 라도 검색어가 다르면 miss**
+  (`miss_reason=query_mismatch`, 기록된 검색어 함께 남김). 결과 행 `correction.replay.compatibility` = `exact` | `legacy_assumed`.
+- 공식 CRAG vs Legacy 검색 방식: 공식 원본은 GPT-3.5 keyword 추출 + serper (Google) + 페이지 수집, MODE B 는
+  Llama 로 검색어 생성 + Tavily. MODE B 안에서도 `correction.query_mode` (legacy_rewrite / official_keywords) 가
+  다르면 검색어가 다르므로 **캐시가 호환되지 않는다** (`search_condition_mismatch`). query_mode 마다 캐시를 따로 만든다.
+- v1 기록 (기존 crag_system `web_cache.jsonl`, 조건 정보 없음) 은 `accept_legacy_records=true` 일 때만, 검색어 문자열과
+  top_k 가 같고 query_mode=legacy_rewrite 일 때 쓴다.
+- 비밀정보: API key 는 환경변수 (`TAVILY_API_KEY`) 로만 읽고, params·raw_response 의 key/token/secret/password/auth
+  이름 필드는 `<redacted>` 로 지운다. `results/` 는 git 에 들어가지 않는다.
+- `replay_on_miss=live`: miss 면 실제 검색하고 그 run 의 `web_cache.jsonl` 에 v2 로 기록 (다음 run 에 추가 가능).
+
+```bash
+# query_mode 별 공유 캐시 (vLLM 실행 중, 모든 질문 1회 검색 = 230 Tavily 호출)
+uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
+    --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
+    --set "inputs.frozen_path=$FROZEN" --name popqa230_legacy_rewrite
+uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
+    --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
+    --set "inputs.frozen_path=$FROZEN" --set correction.query_mode=official_keywords \
+    --name popqa230_official_keywords
+# C1/C2/C3 run 에서
+--set web_search.replay_key=query_strict --set "web_search.replay_paths=[$WEB_CACHE]"
+```
+
+생성 검색어는 temperature 0 순차 실행 기준으로 재현된다. live 모드 (동시 실행) 에서 검색어가 달라지면 miss 로 드러난다
+(조용히 다른 결과를 재사용하지 않음).
+
+### 9.4 Correction 발생 질문 분석 (`analyze_correction.py`)
+
+Correction 발생 범위 (논문 CRAG / 공식 `CRAG_Inference.py`): **Correct** = 내부 refinement 만 (외부 검색 없음, Correction
+아님), **Incorrect** = 내부 문서 버리고 web search, **Ambiguous** = 내부 refinement + web search. 기본 Correction 집합
+= 공식 T5 판정이 Ambiguous ∪ Incorrect. strict (Incorrect 만) 결과도 같이 낸다.
+
+같은 고정 입력·질문·generator·평가 기준인지 `manifest.json` (`comparison`) 으로 확인하고 다르면 실패한다
+(official/vanilla), 또는 해당 비교 run 을 제외하고 사유를 남긴다 (legacy/keep_all). 질문 단위 paired 비교.
+
+```bash
+# 서버: C1 행렬 (T5-OFF, VAN, LL-RULE, T5-KEEP 등) 이 끝난 뒤
+R=results/official_crag/pre
+uv run python experiments/official_crag/analyze_correction.py \
+    --official $R/PRE-C1-T5-OFF/<run_id> --vanilla $R/PRE-C1-VAN/<run_id> \
+    --legacy $R/PRE-C1-LL-RULE/<run_id> --keep-all $R/PRE-C1-T5-KEEP/<run_id> \
+    --question-ids <230문항 id 파일> --name c2_correction_pre
+# (T5 grader 의 legacy 정책과도 비교:  --extra t5_rule=$R/PRE-C1-T5-RULE/<run_id>)
+```
+
+출력 `results/official_crag/analysis/<name>/`:
+
+| 파일 | 내용 |
+|---|---|
+| `summary.json` / `report.md` | 전체 질문 수, Correction 수·비율 (+ strict), 경로 C/A/I 수, web 무효 수, 집합 (correction / strict / all / 경로별) x 비교 (official·legacy·keep_all vs vanilla, vs official) 의 기준·비교 정확도, 개선 (Vanilla 오답→정답) / 악화 (정답→오답) / 둘 다 정답 / 둘 다 오답, McNemar p. `acc` 와 `official_match` 각각. C2 분류, 경로 교차표, 제외 run·사유 |
+| `per_question.csv` | 질문별 T5 경로, correction 실행·유효·검색어, 정책별 정답 (acc / official_match)·경로·e2e, Vanilla 대비 변화, `c2_category` |
+| `path_breakdown.csv` | T5 경로 x 정책: 정확도 + 비용 (e2e, grading / refinement / rewrite / web_search / generation 초, evaluator 계산, generation 토큰, LLM 호출 수, web 검색 비율, evidence 수) |
+| `early_stop_summary.csv` | 중단 규칙 (`first_pass`, `max_docs:k`) 별 조기 중단·판정 변화 (전이)·evidence 변화 수, 절감 문서·grading latency (비율)·토큰, 품질 영향 **상한** |
+| `early_stop_per_question.csv` | 질문 x 규칙 상세 |
+| `verification_candidates.csv` | evidence 가 바뀌어 generation 재실행으로 확인해야 하는 (질문, 규칙) 과 확인 방법 |
+
+C2 분류 (Correction 질문, acc): `correction_improved` (기여), `correction_no_change_correct` / `_wrong` (실행됐지만
+정답 변화 없음), `correction_degraded` (Correction 후 오답). Accuracy 가 Vanilla 보다 높지 않아도 모든 표가 나온다.
+Vanilla 대비 차이는 official 정책에서는 refinement + correction 결합 효과다. `keep_all@official_t5` 는 같은 질문에서
+correction 을 하면서 내부 문서를 유지하므로 keep_all − vanilla 가 "web 추가" 효과에 가깝다.
+
+Grading 중단 분석: full run 의 문서별 기록으로 판정·evidence 변화와 절감 비용은 **정확히** 계산된다 (공식 T5 점수는 문서별
+독립). `first_pass` 는 공식 판정을 바꾸지 않는다 (flag 2 는 확정). 정답 변화는 **확정하지 않는다**: evidence 가 바뀐
+질문 중 full run 정답 수 = 손실 상한, 오답 수 = 이득 상한 (evidence 가 같으면 temperature 0 에서 답이 같다는 가정).
+official 정책은 refinement 를 모든 문서에 대해 한다고 가정한다. 실제 확인: legacy 정책은
+`--set budget.stop_rule=max_docs:k` run 으로 가능, official 정책 + 부분 grading 은 runner 가 거부하므로 판정 강제
+재실행 기능이 필요하다 (미구현).
+
+**주의**: 230문항은 기존 공통 성공 문항 (선택된 집합) 이다. 이 집합의 정확도·Correction 비율을 전체 PopQA 의 일반적인
+수치로 표현하지 않는다 (report 에 자동 표기). mock evaluator run 이면 report 맨 위에 MOCK 경고가 붙는다.

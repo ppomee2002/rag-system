@@ -114,12 +114,20 @@ def main(argv=None):
             it.question, [d.text for d in it.docs], ev, mode, origins=[d.id for d in it.docs]
         )
         if web is not None:
-            docs = web.bind(it.question_id).search(
-                "", (cfg.get("web_search") or {}).get("top_k", 5)
-            )
-            if docs:
-                n_web += 1
-                external_knowledge(it.question, docs, ev)
+            top_k = (cfg.get("web_search") or {}).get("top_k", 5)
+            if web.key_mode == "query_strict":
+                # 이 질문에 기록된 (조건이 같은) 검색어마다. v1 기록만 있으면 여기서 못 찾음
+                # (evaluator.on_miss=delegate 로 실행 중 계산하거나 prefetch_web.py v2 캐시 사용)
+                queries = sorted(web.recorded_queries.get(it.question_id, ()))
+            else:
+                queries = [""]  # query_id 모드: 기록된 검색어로 재생
+            got = False
+            for q in queries:
+                docs = web.bind(it.question_id).search(q, top_k)
+                if docs:
+                    got = True
+                    external_knowledge(it.question, docs, ev)
+            n_web += got
         if (i + 1) % 20 == 0:
             print(f"{i + 1}/{len(items)}", file=sys.stderr)
     rec.f.close()

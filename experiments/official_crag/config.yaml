@@ -44,16 +44,23 @@ correction:
   wiki_prefix: false            # official_keywords 일 때 "Wikipedia, " 접두 (공식 mode=wiki)
   on_web_error: fail            # fail: 오류 행 / continue: web 없이 진행 (correction.valid=false)
 
-web_search:                     # 기존 rag.retrieval.web_cache 재사용
+web_search:                     # 기존 rag.retrieval.web_cache 재사용 (README "Correction 검색 캐시")
   provider: replay              # replay (기록 재생, 기본) | tavily (실제 검색 + 기록)
   top_k: 5
   search_depth: basic
-  record: true                  # provider=tavily 일 때 <run_dir>/web_cache.jsonl
-  replay_from_runs: []          # 기존 crag_system run 폴더 (web_cache.jsonl + queries.jsonl)
-  replay_paths: []
-  replay_key: query_id          # 정책 간 같은 검색 결과
+  include_raw_content: false    # true: Tavily 페이지 원문을 캐시 raw_response 에 (evidence 는 그대로 snippet)
+  record: true                  # provider=tavily 일 때 <run_dir>/web_cache.jsonl (web_cache.v2)
+  replay_from_runs: []          # 기존 run 폴더 (web_cache.jsonl [+ queries.jsonl: replay_key=query_id 용])
+  replay_paths: []              # 공유 캐시 파일 (prefetch_web.py 결과 web_cache.jsonl)
+  replay_key: query_strict      # query_strict: (query_id, 실제 검색어, top_k) + 검색 조건이 모두 같아야 hit
+                                #   (같은 query_id 라도 검색어가 다르면 miss -> 다른 correction query 를 섞지 않음)
+                                # query_id: 기존 동작 (검색어가 달라도 query_id 로 재생, rewrite_matched 기록)
+                                # query: 검색어 문자열만
+  replay_provider: tavily       # query_strict: 기록의 provider 와 비교
+  accept_legacy_records: false  # query_strict 에서 v1 기록 (crag_system web_cache, 조건 정보 없음) 을
+                                # 검색어+top_k 일치 + query_mode=legacy_rewrite 일 때만 허용
   latency_mode: recorded        # recorded | zero
-  replay_on_miss: error         # error | empty
+  replay_on_miss: error         # error | empty | live (miss 면 실제 검색 + 이 run 에 v2 기록)
 
 generation:
   prompt: legacy                # legacy (기존 GENERATE, 모든 정책 공통) | official (공식 PopQA prompt)
@@ -64,6 +71,9 @@ llm:
   provider: vllm
   api: chat                     # chat (기존) | completions (공식처럼 chat template 없이)
   model: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+  revision: null                # manifest 기록용: 서버 HF snapshot hash (~/.cache/huggingface/hub/.../snapshots/<hash>)
+  top_p: null                   # null = 요청에 넣지 않음 (서버 기본 1.0). api=completions 에서만 전송됨
+                                # (chat 엔진은 top_p 를 보내지 않으므로 null 로 둘 것). manifest 에 기록
   base_url: http://127.0.0.1:8000/v1
   api_key_env: VLLM_API_KEY
   temperature: 0.0
@@ -78,8 +88,11 @@ scheduler:                      # FCFS-query baseline (기존 rag.scheduling)
   slots: 1
   engine_priority: none
 
+manifest:                       # <run_dir>/manifest.json (rag.evidence.manifest)
+  full_weight_hash: false       # true: T5 model.safetensors 전체 sha256 (2.75GB, 수십 초)
+
 run:
-  purpose: smoke                # smoke | pre | paper (paper 는 --paper-approved + git clean)
+  purpose: smoke               # smoke | pre | paper (paper 는 --paper-approved + git clean)
   mode: sequential              # sequential | live (--workload 필요)
   warmup_queries: 3             # 앞 3문항을 한 번 더 실행해 측정에서 제외 (결과 행 warmup=true)
   record_texts: false           # evidence·prompt 원문 저장 (용량 큼)

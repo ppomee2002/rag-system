@@ -3,7 +3,9 @@
 #
 # 필요한 환경변수
 #   FROZEN               고정 입력 jsonl (freeze_inputs.py 결과, .manifest.json 동반)
-#   REPLAY_RUN           web 기록을 재생할 기존 crag_system run 폴더 (web_cache.jsonl + queries.jsonl)
+#   WEB_CACHE            공유 correction 검색 캐시 (prefetch_web.py 결과 web_cache.jsonl, v2) — 권장
+#     또는 REPLAY_RUN    기존 crag_system run 폴더 (web_cache.jsonl v1). 검색어 문자열이 같을 때만 재생
+#                        (query_strict + accept_legacy_records). 검색어가 다르면 miss -> 오류 행
 #   CRAG_EVALUATOR_PATH  공식 T5 가중치 폴더 (finetuned_t5_evaluator)
 # 선택
 #   EVAL_DEVICE=cpu      evaluator 위치 (cpu | cuda:0). vLLM 과 같은 GPU 면 README "GPU 메모리" 참고
@@ -13,11 +15,15 @@
 #   ONLY="T5-OFF LL-RULE"   일부 조건만
 #
 # 예)  FROZEN=results/official_crag/inputs/popqa_c1_230.jsonl \
-#      REPLAY_RUN=results/crag_system/smoke/SMOKE-A1-FULL-RETRY/20261110_111726 \
+#      WEB_CACHE=results/official_crag/web_cache/popqa230_legacy_rewrite/web_cache.jsonl \
 #      CRAG_EVALUATOR_PATH=$HOME/models/crag_evaluator/finetuned_t5_evaluator \
 #      LIMIT=10 PURPOSE=smoke PREFIX=SMOKE-C1 bash experiments/official_crag/server/c1_matrix.sh
 set -euo pipefail
-: "${FROZEN:?FROZEN 필요}" "${REPLAY_RUN:?REPLAY_RUN 필요}"
+: "${FROZEN:?FROZEN 필요}"
+if [[ -z "${WEB_CACHE:-}" && -z "${REPLAY_RUN:-}" ]]; then
+  echo "WEB_CACHE 또는 REPLAY_RUN 필요" >&2
+  exit 1
+fi
 EVAL_DEVICE=${EVAL_DEVICE:-cpu}
 EVAL_BACKEND=${EVAL_BACKEND:-t5}
 PURPOSE=${PURPOSE:-pre}
@@ -29,13 +35,19 @@ ENGINE=experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml
 common=(--config "$CFG" --overlay "$ENGINE"
   --set experiment=official_crag
   --set "inputs.frozen_path=$FROZEN"
-  --set "web_search.replay_from_runs=[$REPLAY_RUN]"
+  --set web_search.replay_key=query_strict
   --set "run.purpose=$PURPOSE"
   --set "evaluator.device=$EVAL_DEVICE"
   --set "evaluator.backend=$EVAL_BACKEND")
 if [[ "$EVAL_BACKEND" == cache ]]; then
   : "${EVAL_CACHE:?EVAL_BACKEND=cache 에는 EVAL_CACHE 필요}"
   common+=(--set "evaluator.cache_paths=[$EVAL_CACHE]")
+fi
+if [[ -n "${WEB_CACHE:-}" ]]; then
+  common+=(--set "web_search.replay_paths=[$WEB_CACHE]")
+else
+  common+=(--set "web_search.replay_paths=[$REPLAY_RUN/web_cache.jsonl]"
+    --set web_search.accept_legacy_records=true)
 fi
 [[ -n "${LIMIT:-}" ]] && common+=(--limit "$LIMIT")
 
