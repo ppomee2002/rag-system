@@ -28,3 +28,11 @@ CLAUDE.local.md
 Thumbs.db
 .vscode/
 .idea/
+
+# 공식 CRAG 원본 저장소 / Evaluator 가중치 (커밋 금지: experiments/official_crag/fetch_official.py)
+third_party/
+models/
+*.safetensors
+*.bin
+*.pt
+spiece.model

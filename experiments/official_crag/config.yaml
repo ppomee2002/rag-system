@@ -1,0 +1,85 @@
+# MODE B — Controlled Server Comparison (공식 CRAG 요소를 기존 serving 환경에 이식)
+# configs/base.yaml 위에 deep-merge. 조건 변경은 --set / --overlay.
+# ** 공식 논문 수치의 재현이 아니다 ** (검색 corpus·generator·web 검색이 공식과 다름. README 차이표)
+experiment: official_crag
+exp_id: SMOKE-C1                # 결과: results/official_crag/<purpose>/<exp_id>/<run_id>/
+experiment_mode: B_controlled
+seed: 42
+
+# 고정 입력 (freeze_inputs.py 결과). 기존 PopQA Long-tail 230문항 Top-5
+inputs:
+  frozen_path: results/official_crag/inputs/popqa_c1_230.jsonl   # + .manifest.json
+  limit: null                   # smoke 만 (본 실험은 null)
+
+grader:
+  type: official_t5             # official_t5 (기본) | llama_prompt (legacy 비교군)
+  # llama_prompt 일 때만 사용 (기존 crag_system 값). official_t5 는 evaluator.upper/lower
+  upper: 0.7
+  lower: 0.3
+  record_texts: false
+
+evaluator:                      # 공식 T5 evaluator (grader.type=official_t5 또는 official 정책에서 사용)
+  backend: t5                   # t5 (in-process) | cache (precompute_scores.py 결과)
+  model_path: null              # null 이면 환경변수 CRAG_EVALUATOR_PATH
+  device: cpu                   # cpu | cuda:0 (CUDA_VISIBLE_DEVICES 기준). README "GPU 메모리"
+  batch_size: 1                 # 1 = 공식 (판정 점수는 항상 1쌍씩)
+  dtype: float32                # 공식 = float32 (다른 값은 비공식)
+  task: popqa                   # 공식 threshold: upper 0.592, lower -0.995 (T5 logit 척도)
+  normalize_passage: true       # 공식 data_process.py 처럼 줄바꿈·탭 -> 공백
+  cache_paths: []
+  on_miss: error
+
+evidence_policy: official       # official | crag_rule | no_correct_filter | no_incorrect_discard
+                                # | keep_all | vanilla  (rag.evidence.policies)
+budget:                         # C3. official 정책은 full_grading 만 허용
+  preset: full_grading          # full_grading | lazy_hit | lazy_rest | keep_all
+  # stop_rule: full | first_pass | max_docs:N
+  # retention: policy | hit_only | hit_and_rest | all | ratio (+ ratio: 0.25, ratio_base: rest)
+
+refinement:
+  decompose_mode: selection     # 공식 기본 (run_knowledge_preparation.sh)
+
+correction:
+  query_mode: legacy_rewrite    # legacy_rewrite (기존 REWRITE prompt) | official_keywords (공식 few-shot, Llama 로 실행)
+  wiki_prefix: false            # official_keywords 일 때 "Wikipedia, " 접두 (공식 mode=wiki)
+  on_web_error: fail            # fail: 오류 행 / continue: web 없이 진행 (correction.valid=false)
+
+web_search:                     # 기존 rag.retrieval.web_cache 재사용
+  provider: replay              # replay (기록 재생, 기본) | tavily (실제 검색 + 기록)
+  top_k: 5
+  search_depth: basic
+  record: true                  # provider=tavily 일 때 <run_dir>/web_cache.jsonl
+  replay_from_runs: []          # 기존 crag_system run 폴더 (web_cache.jsonl + queries.jsonl)
+  replay_paths: []
+  replay_key: query_id          # 정책 간 같은 검색 결과
+  latency_mode: recorded        # recorded | zero
+  replay_on_miss: error         # error | empty
+
+generation:
+  prompt: legacy                # legacy (기존 GENERATE, 모든 정책 공통) | official (공식 PopQA prompt)
+  max_tokens: null              # null = llm.max_tokens
+
+# Generator: 기존 vLLM AWQ INT4 프로필을 --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml
+llm:
+  provider: vllm
+  api: chat                     # chat (기존) | completions (공식처럼 chat template 없이)
+  model: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY
+  temperature: 0.0
+  max_tokens: 512
+  seed: 0
+  stream: true
+  send_priority: false
+  timeout: 600
+
+scheduler:                      # FCFS-query baseline (기존 rag.scheduling)
+  policy: fcfs_query
+  slots: 1
+  engine_priority: none
+
+run:
+  purpose: smoke                # smoke | pre | paper (paper 는 --paper-approved + git clean)
+  mode: sequential              # sequential | live (--workload 필요)
+  warmup_queries: 3             # 앞 3문항을 한 번 더 실행해 측정에서 제외 (결과 행 warmup=true)
+  record_texts: false           # evidence·prompt 원문 저장 (용량 큼)

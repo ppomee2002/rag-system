@@ -22,6 +22,12 @@ crag = [
     "matplotlib>=3.8",
     "langgraph>=1.0,<2",   # crag_system: LangGraph CRAG (rag.graph)
 ]
+# 공식 CRAG T5 evaluator (uv sync --extra crag --extra official). torch / transformers 는
+# sentence-transformers 를 통해 이미 설치됨. 공식 가중치에 tokenizer.json 이 없어 sentencepiece 필요
+official = [
+    "sentencepiece>=0.2",
+    "protobuf>=4",
+]
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,24 @@
+# MODE A — Official Reproduction (PopQA) generator 설정.
+# 공식: vLLM offline LLM(model, dtype=half) + SamplingParams(temperature=0, top_p=1, max_tokens=100)
+#       chat template 없이 prompt 원문. Generator 는 논문 기준 LLaMA2-7B 계열.
+experiment: official_crag
+experiment_mode: A_official_reproduction
+
+llm:
+  provider: vllm
+  api: completions              # 공식처럼 raw prompt (chat template 미적용)
+  model: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4   # ** 공식과 다름 ** (아래 deviations)
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 100
+  seed: 0
+  stream: false
+  timeout: 600
+
+deviations:                     # run_meta 에 그대로 기록된다
+  generator: "논문 LLaMA2-hf-7b / selfrag_llama2_7b -> 이 설정의 llm.model (서버에 LLaMA2-7B 가 있으면 교체)"
+  serving: "공식 vLLM 0.2.5 offline generate -> vLLM 0.33.0 OpenAI completions 서버"
+  quantization: "공식 fp16 (dtype=half) -> AWQ INT4 (기본 설정일 때)"
+  external_knowledge: "저자 제공 ref/{correct,incorrect,ambiguous} 재사용 (GPT-3.5 + serper 재실행 안 함)"
