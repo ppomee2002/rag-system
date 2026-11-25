@@ -275,6 +275,33 @@ class ControlledCRAG:
                 else:
                     web_units = [_unit(d, "web") for d in web_docs]
 
+            # ---- fallback ablation: Incorrect 에서 web evidence 가 비면 internal refine 사용
+            fallback = None
+            if (
+                action == "incorrect"
+                and self.policy.incorrect_fallback_on_empty_web
+                and not (external_text or "").strip()
+                and not web_units
+            ):
+                with timer.stage("refinement"):
+                    refinement = internal_knowledge(
+                        item.question,
+                        [d.text for d in retrieved],
+                        self._strip_scorer(grader_llm, tracker, item),
+                        self.cfg.decompose_mode,
+                        origins=[d.id for d in retrieved],
+                    )
+                internal_text = refinement.text
+                internal = [
+                    EvidenceUnit(
+                        f"{s.origin}#s{s.index}", s.text, "retrieved_strip", s.origin, s.score
+                    )
+                    for s in refinement.selected
+                ]
+                external_text = None
+                mode = "refine (fallback: web evidence 없음)"
+                fallback = {"applied": True, "reason": correction.get("status") or "no_web"}
+
             units = internal + web_units
             # ---- generation
             paragraph = self._official_paragraph(action, internal_text, external_text, units)
@@ -334,6 +361,7 @@ class ControlledCRAG:
                 else None,
             ],
             correction=correction,
+            fallback=fallback,
             evidence={
                 "kept_retrieved_ids": kept,
                 "removed_retrieved_ids": [i for i in retrieved_ids if i not in kept],
@@ -384,6 +412,13 @@ class ControlledCRAG:
             if action == "incorrect":
                 return external_text or ""
             return ambiguous_knowledge(internal_text or "", external_text or "")
+        if self.policy.official_structure and action is not None:
+            # fallback ablation: 있는 지식만으로 공식과 같은 형식 (둘 다 있으면 결합 템플릿)
+            if internal_text is not None and external_text is not None:
+                return ambiguous_knowledge(internal_text, external_text)
+            if internal_text is not None:
+                return internal_text
+            return external_text or ""
         return source.RAG_PASSAGE_JOIN.join(u.text for u in units)
 
 

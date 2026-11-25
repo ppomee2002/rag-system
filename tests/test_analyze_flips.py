@@ -279,3 +279,101 @@ def test_mode_a_compare(tmp_path, monkeypatch):
 def _mk(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# ---------------------------------------------------------------- GAIN 명칭 / generation 입력
+def test_gain_filter_is_not_grader_error(synth):  # noqa: F811
+    tmp, v_dir, f_dir = synth
+    rows = [json.loads(x) for x in (v_dir / "queries.jsonl").read_text().splitlines()]
+    frows = [json.loads(x) for x in (f_dir / "queries.jsonl").read_text().splitlines()]
+    # q5: Vanilla 오답 (방해 문서 e3 'Kyoto ... former capital' 에 끌림) -> CRAG 는 e1 만 유지, 정답
+    for r in rows:
+        if r["query_id"] == "q5":
+            r["answer"], r["acc"] = "Kyoto", 0.0
+    write_jsonl(v_dir / "queries.jsonl", rows)
+    out = run_flips(tmp, v_dir, f_dir)
+    c = by_id(read_csv(out / "flip_cases.csv"))["q5"]
+    assert c["direction"] == "gain" and c["primary_cause"] == "filter_gain"
+    assert "개선 후보" in c["primary_cause_ko"] and "Grader 오판정" not in c["primary_cause_ko"]
+    g6 = by_id(read_csv(out / "flip_cases.csv"))["q6"]
+    assert g6["primary_cause_ko"].startswith("외부 지식 추가")
+    assert frows  # f_dir 는 그대로
+
+
+def test_generation_inputs_incorrect_harm(synth):  # noqa: F811
+    tmp, v_dir, f_dir = synth
+    out = run_flips(tmp, v_dir, f_dir)
+    cases = by_id(read_csv(out / "flip_cases.csv"))
+    q2 = cases["q2"]  # Incorrect: FAISS 전부 제거, web 2개 (정답 없음)
+    assert q2["gen_retrieval_all_removed"] == "True"
+    assert (q2["gen_n_retrieved_in_prompt"], q2["gen_n_web_in_prompt"]) == ("0", "2")
+    assert q2["gen_prompt_has_gold"] == "False"
+    assert q2["gen_prompt_source"].startswith("reconstructed")
+    q8 = cases["q8"]  # Incorrect + web 0개 -> 빈 context 로 생성
+    assert q8["gen_ctx_empty"] == "True" and q8["gen_retrieval_all_removed"] == "True"
+    gi = (out / "generation_inputs.md").read_text(encoding="utf-8")
+    assert "[1] Opera houses in Europe." in gi  # 재구성 prompt 에 web 본문이 그대로
+    rep = (out / "report.md").read_text(encoding="utf-8")
+    assert "| `q2` | 0 | True | 2 |" in rep
+
+
+# ---------------------------------------------------------------- pairwise
+def test_pairwise_two_metrics_and_special_cases(synth):  # noqa: F811
+    import pairwise as pw
+
+    tmp, v_dir, f_dir = synth
+    rows = [json.loads(x) for x in (v_dir / "queries.jsonl").read_text().splitlines()]
+    for r in rows:
+        if r["query_id"] == "q1":
+            r["answer"] = "paris"  # accuracy 1, official_match 0
+    write_jsonl(v_dir / "queries.jsonl", rows)
+    out = pw.main(
+        [
+            "--run",
+            f"VAN={v_dir}",
+            "--run",
+            f"CRAG={f_dir}",
+            "--name",
+            "t",
+            "--out-root",
+            str(tmp / "pw"),
+            "--bootstrap",
+            "200",
+        ]
+    )
+    acc = read_csv(out / "pairwise_accuracy.csv")[0]
+    om = read_csv(out / "pairwise_official_match.csv")[0]
+    assert (acc["a"], acc["b"]) == ("VAN", "CRAG")
+    assert int(acc["harm_a_only"]) == 7 and int(acc["gain_b_only"]) == 1  # q1..q4,q7,q8,q9 / q6
+    assert int(om["harm_a_only"]) == 6  # q1 은 official_match 로는 둘 다 오답
+    fl = {r["query_id"]: r for r in read_csv(out / "flips.csv")}
+    assert fl["q1"]["flip_in_one_metric_only"] == "accuracy"
+    sp = {r["query_id"]: r for r in read_csv(out / "special_cases.csv")}
+    assert sp["q9"]["candidate"] == "alias_surface"  # Obama / Barack Obama
+    assert sp["q9"]["run"] == "CRAG"
+    ag = {r["run"]: r for r in read_csv(out / "metric_agreement.csv")}
+    assert ag["VAN"]["acc1_om0"] == "1"
+
+
+def test_review_case_homonym_and_dataset_error():
+    import pairwise as pw
+
+    r = pw.review_case(
+        "What is John Smith's occupation?",
+        ["painter"],
+        "footballer",
+        [
+            ("d1", "John Smith (footballer) is an English footballer."),
+            ("d2", "John Smith (painter) was a painter."),
+        ],
+    )
+    assert r["candidate"] == "homonym_person" and r["relation"] == "occupation"
+    r = pw.review_case(
+        "Who was the director of Foo Bar?",
+        ["Alice Jones"],
+        "Bob Lee",
+        [("d1", "Foo Bar is a 1990 film directed by Bob Lee.")],
+    )
+    assert r["candidate"] == "dataset_error" and r["subject_kind"] == "work"
+    r = pw.review_case("Who was the director of Foo Bar?", ["Alice Jones"], "unknown", [])
+    assert r["candidate"] == "none"

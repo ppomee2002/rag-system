@@ -11,6 +11,9 @@
   no_incorrect_discard  score>=upper      score>=lower + web    top-k + web      raw 문서
   keep_all              top-k 전부        top-k + web           top-k + web      raw 문서
   official              refine(전부)      refine + web refine   web refine       refine
+  official_fb_combined  refine(전부)      refine + web refine   refine + web refine  refine
+  official_fb_internal  refine(전부)      refine + web refine   refine (web 없음)    refine
+  official_fb_web_empty refine(전부)      refine + web refine   web refine, web 이 비면 refine
 
   crag_rule            = rag.graph.CRAGGraph / rag.pipelines.crag.CRAG (기존 Full CRAG)
   no_correct_filter    = experiments/crag_system/ablation.py correct_keep_topk (Ablation B)
@@ -20,6 +23,13 @@
   official             = 공식 CRAG. refine = rag.crag_official.refinement
                          internal: 모든 문서의 strip 중 evaluator 점수 상위 3
                          external: web 문단 중 상위 5, ambiguous: 결합 템플릿
+  official_fb_*        = Incorrect fallback ablation (비교군. official 정책 자체는 그대로).
+                         Incorrect 에서 기존 검색 evidence (공식 refinement 결과) 를 버리지 않는다.
+                         combined : Incorrect 를 Ambiguous 와 같은 형식 (Knowledge1/Knowledge2) 으로
+                         internal : web correction 없이 internal refinement 만 (검색 evidence 유지)
+                         web_empty: 공식과 같되 web 결과가 비었을 때 (empty/오류/replay miss)
+                                    만 internal
+                         legacy 구조의 같은 비교군은 no_incorrect_discard (top-k + web raw).
 
 같은 정책 이름이라도 grader 가 다르면 의미가 달라지므로 결과에는 policy_id = "<정책>@<grader>" 와
 threshold·척도를 함께 기록한다. 특히 official@llama_prompt 는 공식 정책 구조에 Llama 0~1 점수를 넣은
@@ -43,6 +53,13 @@ class EvidencePolicySpec:
     web_on: tuple[str, ...]  # web correction 을 하는 판정
     web_form: str  # raw | refine
     source: str
+    # Incorrect 에서 web evidence 가 비었을 때 internal 로 대체할지 (fallback ablation 전용)
+    incorrect_fallback_on_empty_web: bool = False
+
+    @property
+    def official_structure(self) -> bool:
+        """공식 지식 문자열 (refine + 결합 템플릿) 로 generation 문단을 만드는 정책."""
+        return self.web_form == "refine"
 
     def internal_mode(self, action: str) -> str:
         return getattr(self, action)
@@ -112,8 +129,40 @@ POLICIES: dict[str, EvidencePolicySpec] = {
             "refine",
             "HuskyInSalt/CRAG@de7c296 (knowledge refinement + combined knowledge)",
         ),
+        EvidencePolicySpec(
+            "official_fb_combined",
+            True,
+            "refine",
+            "refine",
+            "refine",
+            _CORR,
+            "refine",
+            "fallback ablation: Incorrect 도 internal refine + web refine (Ambiguous 형식)",
+        ),
+        EvidencePolicySpec(
+            "official_fb_internal",
+            True,
+            "refine",
+            "refine",
+            "refine",
+            ("ambiguous",),
+            "refine",
+            "fallback ablation: Incorrect 는 web correction 없이 internal refine 유지",
+        ),
+        EvidencePolicySpec(
+            "official_fb_web_empty",
+            True,
+            "refine",
+            "refine",
+            "none",
+            _CORR,
+            "refine",
+            "fallback ablation: Incorrect 에서 web evidence 가 비었을 때만 internal refine",
+            incorrect_fallback_on_empty_web=True,
+        ),
     )
 }
+FALLBACK_POLICIES = ("official_fb_combined", "official_fb_internal", "official_fb_web_empty")
 
 
 def get_policy(name: str) -> EvidencePolicySpec:
@@ -136,13 +185,17 @@ def check_combination(policy: EvidencePolicySpec, grader_type: str | None, budge
         if not budget.is_full_default:
             raise ValueError("vanilla 정책에는 budget (grading 제어) 를 쓸 수 없음")
         return {"official_policy_semantics": False, "note": "grading 없음"}
-    if policy.name == "official" and not budget.is_full_default:
+    if policy.official_structure and not budget.is_full_default:
         raise ValueError(
-            "official 정책은 모든 문서의 refinement 점수가 필요해 Lazy/부분 grading 과 조합할 수 없음 "  # noqa: E501
+            f"{policy.name} (official 구조) 정책은 모든 문서의 refinement 점수가 필요해 Lazy/부분 grading 과 조합할 수 없음 "  # noqa: E501
             "(판정은 같아도 evidence 가 공식과 다름). C3 실험은 legacy 정책 (crag_rule 등) 으로"
         )
     semantics = policy.name == "official" and grader_type == "official_t5"
     note = None
-    if policy.name == "official" and grader_type != "official_t5":
+    if policy.official_structure and grader_type != "official_t5":
         note = "비공식 조합: 공식 정책 구조에 다른 grader 점수 사용"
+    if policy.name in FALLBACK_POLICIES:
+        note = (note + "; " if note else "") + (
+            "fallback ablation (비교군): Incorrect 경로만 공식과 다름. 공식 CRAG 조건 아님"
+        )
     return {"official_policy_semantics": semantics, "note": note}

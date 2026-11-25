@@ -64,8 +64,16 @@ declare -A COND=(
   [LL-NID]="--set grader.type=llama_prompt --set evidence_policy=no_incorrect_discard"
   [LL-KEEP]="--set grader.type=llama_prompt --set evidence_policy=keep_all"
   [LL-OFF]="--set grader.type=llama_prompt --set evidence_policy=official"
+  # Prompt 효과 분리: 같은 evidence (vanilla Top-5) 에 공식 PopQA prompt. VAN 과 짝, T5-OFF / T5-OFF-OP 와 2x2
+  [VAN-OP]="--set evidence_policy=vanilla --set generation.prompt=official"
+  [T5-RULE-OP]="--set grader.type=official_t5 --set evidence_policy=crag_rule --set generation.prompt=official"
+  # Incorrect fallback ablation (비교군, T5-OFF 와 Incorrect 경로만 다름. 공식 조건 아님)
+  [T5-OFF-FBC]="--set grader.type=official_t5 --set evidence_policy=official_fb_combined"
+  [T5-OFF-FBI]="--set grader.type=official_t5 --set evidence_policy=official_fb_internal"
+  [T5-OFF-FBW]="--set grader.type=official_t5 --set evidence_policy=official_fb_web_empty"
 )
-ORDER=(VAN T5-OFF T5-OFF-OP T5-RULE T5-NCF T5-NID T5-KEEP LL-RULE LL-NCF LL-NID LL-KEEP LL-OFF)
+ORDER=(VAN T5-OFF T5-OFF-OP T5-RULE T5-NCF T5-NID T5-KEEP LL-RULE LL-NCF LL-NID LL-KEEP LL-OFF
+  VAN-OP T5-RULE-OP T5-OFF-FBC T5-OFF-FBI T5-OFF-FBW)
 [[ -n "${ONLY:-}" ]] && read -r -a ORDER <<< "$ONLY"
 
 mkdir -p results/official_crag/logs

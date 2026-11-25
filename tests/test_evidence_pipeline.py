@@ -316,9 +316,61 @@ def test_policy_registry_documents_sources():
         "no_incorrect_discard",
         "keep_all",
         "official",
+        "official_fb_combined",
+        "official_fb_internal",
+        "official_fb_web_empty",
     }
     with pytest.raises(ValueError):
         get_policy("nope")
+
+
+# ---------------------------------------------------------------- Incorrect fallback ablation
+@pytest.mark.parametrize("pattern", ["MGB", "MBB"])  # correct / ambiguous 는 official 과 같아야 함
+def test_fallback_policies_match_official_outside_incorrect(pattern):
+    base = run_policy("official", pattern, prompt="official", record_texts=True)
+    for pol in ("official_fb_combined", "official_fb_internal", "official_fb_web_empty"):
+        r = run_policy(pol, pattern, prompt="official", record_texts=True)
+        assert r["correction_path"] == base["correction_path"]
+        assert r["generation_prompt"] == base["generation_prompt"], pol
+        assert r["official_policy_semantics"] is False
+
+
+def test_fallback_policies_incorrect_path():
+    off = run_policy("official", "BBB", prompt="official", record_texts=True)
+    assert off["correction_path"] == "incorrect"
+    assert off["evidence"]["kept_retrieved_ids"] == []  # 공식: 검색 evidence 전부 제거
+    assert off["evidence"]["added_ids"]  # web 만
+    comb = run_policy("official_fb_combined", "BBB", prompt="official", record_texts=True)
+    assert comb["evidence"]["kept_retrieved_ids"] and comb["evidence"]["added_ids"]
+    assert (
+        "Knowledge1: " in comb["generation_prompt"] and "Knowledge2: " in comb["generation_prompt"]
+    )
+    web = FakeWeb()
+    intl = run_policy("official_fb_internal", "BBB", web=web, prompt="official", record_texts=True)
+    assert web.queries == [] and intl["correction"]["performed"] is False
+    assert intl["evidence"]["kept_retrieved_ids"] and not intl["evidence"]["added_ids"]
+    # web_empty: web 결과가 있으면 공식과 같고, 비면 internal 로 대체
+    w_ok = run_policy("official_fb_web_empty", "BBB", prompt="official", record_texts=True)
+    assert w_ok["generation_prompt"] == off["generation_prompt"] and w_ok["fallback"] is None
+    w_empty = run_policy(
+        "official_fb_web_empty", "BBB", web=FakeWeb(docs=[]), prompt="official", record_texts=True
+    )
+    off_empty = run_policy(
+        "official", "BBB", web=FakeWeb(docs=[]), prompt="official", record_texts=True
+    )
+    assert w_empty["fallback"] == {"applied": True, "reason": "empty"}
+    assert w_empty["evidence"]["kept_retrieved_ids"] == ["d0", "d1", "d2"]
+    assert off_empty["evidence"]["n_units"] == 0  # 공식: 빈 문단으로 생성
+    with pytest.raises(ValueError, match="official"):
+        run_policy("official_fb_combined", "BBB", budget={"preset": "lazy_rest"})
+
+
+def test_vanilla_official_prompt_uses_same_evidence():
+    leg = run_policy("vanilla", "MGB", record_texts=True)
+    op = run_policy("vanilla", "MGB", prompt="official", record_texts=True)
+    assert leg["evidence"]["selected_evidence_ids"] == op["evidence"]["selected_evidence_ids"]
+    assert op["generation_prompt"].startswith("Refer to the following documents")
+    assert " [sep] " in op["generation_prompt"]  # 공식 rag 처럼 문서 결합
 
 
 # ---------------------------------------------------------------- frozen inputs

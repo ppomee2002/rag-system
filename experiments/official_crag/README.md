@@ -168,6 +168,9 @@ experiments/official_crag/
 | `no_incorrect_discard` | score≥upper | score≥lower + web | top-5 + web | Ablation A (동등성 테스트) |
 | `keep_all` | top-5 | top-5 + web | top-5 + web | 신규 |
 | `official` | refine (상위 3) | Knowledge1/2 결합 | web refine (상위 5) | 공식 |
+| `official_fb_combined` | (official 과 같음) | (같음) | refine + web refine (Knowledge1/2) | Incorrect fallback ablation (11.4) |
+| `official_fb_internal` | (같음) | (같음) | refine, web correction 없음 | 〃 |
+| `official_fb_web_empty` | (같음) | (같음) | web refine, web 이 비면 refine | 〃 |
 
 `policy_id = <정책>@<grader>[+budget]`. `official@official_t5` 만 `official_policy_semantics=true`.
 `official@llama_prompt` 는 공식 정책 구조에 Llama 점수를 넣은 비공식 조합 (selection 모드에서 strip=문서라
@@ -678,3 +681,93 @@ SCORES=results/official_crag/mode_a/score/t5_full ANSWERS=<popqa_longtail_w_gs.j
 - 생성 설정이 `generation_config: vllm` 이므로 체크포인트의 generation_config.json 기본값은 쓰지 않는다 (공식 offline
   `SamplingParams` 명시값과 같은 효과).
 - 시작 전 `launch_vllm.py --dry-run` 으로 명령·GPU 배정·vLLM 옵션 지원 여부를 확인하고, `--smoke` 로 첫 실행한다.
+
+
+---
+
+## 11. Flip-20 후속 (2026-11-25, 로컬 코드·분석 도구만. 서버 결과 없음)
+
+### 11.1 GAIN 분류 명칭 수정
+
+GAIN 에서 "정답 문서는 유지되고 정답 없는 문서가 제거됨" 은 grader 가 **맞게** 판정한 경우인데 `Grader 오판정` 으로
+표시되던 오류를 고쳤다. 새 key `filter_gain` = **"정답 근거 유지·방해 문서 제거 (개선 후보)"**. GAIN 의 `external` 은
+"외부 지식 추가 (개선 후보)" 로 표기한다. HARM 의 `grader` (Grader 오판정) 정의는 그대로다. 이미 만든 보고서는
+그대로 두고 (덮어쓰지 않음), `analyze_flips.py` 를 다시 실행하면 새 이름으로 나온다.
+
+### 11.2 Incorrect HARM: 검색 evidence 제거와 web 결과의 prompt 반영 (코드 확인 + 사례별 확인 도구)
+
+코드 경로 (확인 결과):
+
+| 실행 경로 | Incorrect 의 최종 context | generation prompt |
+|---|---|---|
+| crag_system `CRAGGraph._web_search` (`contexts = web_docs if action == "incorrect"`) · `rag.pipelines.crag` 같음 | **검색 Top-5 전부 제거**, web 문서만 | `prompts.GENERATE` 의 `Context:` 에 `[i] <web 본문>` 번호 목록. web 본문 = Tavily `content` 스니펫 (제목·URL 없음) |
+| 같은 경로, web 결과 0개 | **빈 context** (`Context:` 아래 아무것도 없음) 로 생성 | 오류로 처리되지 않음 (CRAGGraph) |
+| MODE B `official` | 검색 evidence 제거 (`kept_retrieved_ids=[]`), web 문단 refine 상위 5 를 `; ` 로 결합 | `generation.prompt` 에 따라 공식 PopQA prompt 의 `Documents:` 또는 GENERATE 의 `[i]` 목록 |
+| MODE B `crag_rule` | 검색 evidence 제거, web 문서 원문 | 위와 같음 |
+
+`analyze_flips.py` 가 사례마다 이것을 실제 기록으로 확인한다 (`flip_cases.csv` 의 `gen_*` 열, report 1절 표,
+`generation_inputs.md` 에 문항별 prompt 전문):
+`gen_n_retrieved_in_prompt` (남은 검색 문서 수), `gen_retrieval_all_removed`, `gen_n_web_in_prompt`, `gen_ctx_empty`,
+`gen_web_status`, `gen_prompt_has_gold`, `gen_prompt_source`. crag_system 은 prompt 원문이 기록되지 않으므로
+**기록된 context id 순서 + 문서 원문으로 재구성** 한 것이며 (`reconstructed`), 기록된 생성 `prompt_tokens` 를 함께
+보여 준다 (길이 대조). MODE B 는 `run.record_texts=true` 면 실제 prompt (`recorded`).
+
+### 11.3 Prompt 효과 분리: Vanilla + Official Prompt
+
+`c1_matrix.sh` 조건 추가 (MODE B, 같은 고정 Top-5·같은 web 기록·같은 generator):
+
+| | legacy prompt (GENERATE) | official prompt (공식 PopQA) |
+|---|---|---|
+| Vanilla (Top-5 전부) | `VAN` | **`VAN-OP`** (신규) |
+| crag_rule @T5 | `T5-RULE` | **`T5-RULE-OP`** (신규) |
+| official @T5 | `T5-OFF` | `T5-OFF-OP` |
+
+- prompt 효과 = 같은 evidence 행에서 열 차이 (`VAN` vs `VAN-OP`), evidence 효과 = 같은 prompt 열에서 행 차이.
+  `VAN-OP` 의 문단은 공식 `method=rag` 처럼 문서를 ` [sep] ` 로 결합한다.
+- official prompt 는 공식 후처리 (개행·제어 토큰 제거) 를 함께 쓴다. `generation.max_tokens` 는 기본 `llm.max_tokens`
+  (공식 100 과 다름) 이므로 두 열 모두 같은 값이다 — 공식 100 으로 맞추려면 네 조건 모두 `--set generation.max_tokens=100`.
+- 실행: `ONLY="VAN VAN-OP T5-RULE T5-RULE-OP T5-OFF T5-OFF-OP" ... bash experiments/official_crag/server/c1_matrix.sh`
+
+### 11.4 Incorrect Fallback Ablation (설계·구현, 공식 조건은 변경 없음)
+
+`official` 정책과 공식 판정·threshold·refinement 는 그대로 두고, **Incorrect 경로만** 다른 비교군 정책 3개를 추가했다
+(`official_policy_semantics=false`, combination note 에 "fallback ablation (비교군)" 기록).
+
+| 조건 (`c1_matrix.sh`) | 정책 | Incorrect 에서 generation 문단 | 묻는 질문 |
+|---|---|---|---|
+| `T5-OFF` | `official` | web refine 만 (공식) | 기준 |
+| `T5-OFF-FBC` | `official_fb_combined` | `Knowledge1: <internal refine> [sep] Knowledge2: <web refine>` (Ambiguous 와 같은 형식) | 검색 evidence 를 버리지 않고 web 을 더하면? |
+| `T5-OFF-FBI` | `official_fb_internal` | internal refine 만 (web correction 호출 없음) | Incorrect 판정 문항에서 web 이 오히려 해로운가? |
+| `T5-OFF-FBW` | `official_fb_web_empty` | 공식과 같되, web evidence 가 비면 (empty·오류·replay miss) internal refine | 빈 context 생성 손실만 막으면? (`fallback.applied` 기록) |
+| `T5-NID` (기존) | `no_incorrect_discard` | legacy 구조: Top-5 원문 + web 원문 | legacy 구조에서 같은 질문 |
+
+- Correct / Ambiguous 문항은 네 정책이 공식과 **같은 prompt** 를 만든다 (테스트로 확인). 따라서 `T5-OFF` 와의 차이는
+  Incorrect 문항에서만 생기며, 분석은 `analyze_correction.py` / `pairwise.py` 를 Incorrect 문항으로 나눠 본다.
+- 판정 (correct/ambiguous/incorrect) 은 네 조건이 같다 (같은 T5 점수·threshold).
+- 부분 grading (lazy) 과는 조합할 수 없다 (official 구조 정책 공통, 거부).
+
+### 11.5 Pairwise 비교: accuracy / official_match 각각 + 특수 사례 후보 (`pairwise.py`)
+
+```bash
+uv run python experiments/official_crag/pairwise.py \
+    --run VAN=<run> --run VAN-OP=<run> --run T5-OFF=<run> --run T5-OFF-FBC=<run> ... \
+    --baseline VAN --name c1_pairwise          # --all-pairs 면 모든 쌍
+```
+
+- 두 지표를 답변·정답에서 다시 계산해 쌍마다 따로 낸다: 정확도, 차이, HARM/GAIN, McNemar, bootstrap 95% CI.
+  `flips.csv` 의 `flip_in_one_metric_only` 는 한 지표에서만 뒤집힌 문항 (= 평가 방식 차이).
+- `special_cases.csv`: 뒤집힌 문항의 **틀린 쪽 답** 마다 후보 분류와 근거 (`evidence_note`):
+  `homonym_person` (동명이인), `homonym_work` (동명 작품), `homonym_other`, `alias_surface` (정답 alias·표기·대소문자),
+  `dataset_error` (문서는 예측을 지지하고 정답 문자열은 어디에도 없음 / 정답 목록 비어 있음). 규칙은 스크립트 docstring.
+  사람·작품 구분은 PopQA 질문 템플릿의 관계 (occupation·father… = 사람, director·author… = 작품) 로 정한다.
+- 모두 문자열 규칙 기반 **후보** 이다. `manual_label` 에 확정값을 적고, 확정 전 수치를 논문 결론에 쓰지 않는다.
+  crag_system 과 MODE B 결과를 함께 줄 수 있다 (같은 문항 id 의 공통 집합에서 비교).
+
+### 11.6 Threshold 원칙
+
+- 공식 T5 threshold (PopQA 0.592 / -0.995) 와 legacy Llama threshold (0.7 / 0.3) 는 **이 테스트셋 (C1 공통 200문항,
+  PopQA 1,399) 결과를 보고 조정하지 않는다**. 이번 작업에서도 바꾸지 않았다.
+- 바꿔야 한다면 테스트 문항과 겹치지 않는 별도 개발 데이터 (예: PopQA 중 C1 200문항·평가 1,399 외 문항, 또는 다른
+  데이터셋 dev split) 에서 정하고, 그 데이터·탐색 범위·선택 기준을 결과와 함께 기록한 뒤 테스트셋에서는 한 번만 평가한다.
+  dev split 정의는 아직 없다 (8절 "아직 구현·검증되지 않은 것").
+- fallback ablation (11.4) 은 threshold 를 바꾸지 않고 Incorrect 이후의 evidence 처리만 바꾼다.

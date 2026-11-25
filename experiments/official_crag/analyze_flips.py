@@ -80,7 +80,11 @@ CAUSES = {
     "evaluation": "평가 차이",
     "hold": "판정 보류 (데이터)",
     "other": "기타 (수동 확인)",
+    # GAIN 전용: 문자열 지표상 개선 후보 (오판정이 아님)
+    "filter_gain": "정답 근거 유지·방해 문서 제거 (개선 후보)",
 }
+# 같은 key 라도 GAIN 에서는 개선 방향으로 표기
+CAUSES_GAIN = {"external": "외부 지식 추가 (개선 후보)"}
 MODE_B_SCHEMA = "official_crag.query.v1"
 
 
@@ -124,6 +128,20 @@ def mode_b_row(r: dict) -> dict:
         },
         "_policy_id": r.get("policy_id"),
         "_thresholds": r.get("thresholds"),
+        "_generation_prompt": r.get("generation_prompt"),
+        "_prompt_mode": ((r.get("pipeline") or {}).get("prompt")),
+        "_units": [
+            {
+                "id": u.get("id"),
+                "kind": u.get("kind"),
+                "origin": u.get("origin"),
+                "chars": u.get("chars"),
+                "text": u.get("text"),
+            }
+            for u in ev.get("units") or []
+        ],
+        "_paragraph_chars": ev.get("paragraph_chars"),
+        "_web_status": corr.get("status"),
     }
 
 
@@ -221,9 +239,10 @@ def classify(direction: str, case: dict, docs: list[dict], upper: float, lower: 
 
     def done(primary: str, detail: str) -> dict:
         rest = [c for c in dict.fromkeys(contrib) if c != primary]
+        label = CAUSES_GAIN.get(primary, CAUSES[primary]) if direction == "gain" else None
         return {
             "primary_cause": primary,
-            "primary_cause_ko": CAUSES[primary],
+            "primary_cause_ko": label or CAUSES[primary],
             "cause_detail": detail,
             "contributing": ";".join(rest),
         }
@@ -276,7 +295,9 @@ def classify(direction: str, case: dict, docs: list[dict], upper: float, lower: 
         ]
         if dropped_nongold and not removed_gold:
             return done(
-                "grader", "정답 문서 유지 + 정답 없는 문서 제거 (방해 문서 제거, 정상 판정)"
+                "filter_gain",
+                f"정답 문자열 문서 유지 + 정답 없는 문서 {len(dropped_nongold)}개 제거 "
+                "(방해 문서 제거 후보. Grader 오판정이 아님)",
             )
         return done("prompt", "정답 문서가 양쪽 context 에 있고 형태·순서만 다름")
     if not g_v and not g_f:
@@ -285,6 +306,99 @@ def classify(direction: str, case: dict, docs: list[dict], upper: float, lower: 
     if g_v and not g_f:
         return done("evaluation", "정답 문서가 제거됐는데 정답 (모델 지식·우연 일치 가능)")
     return done("other", "신호 조합이 규칙에 해당하지 않음")
+
+
+# ---------------------------------------------------------------- generation 입력 확인
+def generation_view(fmt: str, row: dict, text_of, golds: list[str]) -> dict:
+    """비교 run 의 최종 generation 입력: 어떤 문서가 어떤 순서로 prompt 에 들어갔는지.
+
+    crag_system: 기록된 contexts (문서 id 순서) + 원문으로 prompts.GENERATE 를 재구성
+      (CRAGGraph._generate / rag.pipelines.crag 와 같은 형식. prompt 원문은 기록되지 않음).
+    MODE B: record_texts 로 기록된 generation_prompt 가 있으면 그대로, 없으면 evidence.units
+      의 id·종류만 (refine strip 원문은 기록이 없으면 재구성 불가).
+    """
+    from analyze_regression import has_gold
+
+    from rag.pipelines import prompts
+    from rag.types import Document
+
+    fv = full_view(row)
+    ret = set(fv["ret_ids"])
+    items = []
+    if fmt == "mode_b" and row.get("_units"):
+        for u in row["_units"]:
+            src = "retrieved" if u["kind"] in ("retrieved", "retrieved_strip") else "web"
+            t = u.get("text")
+            if t is None and u["kind"] in ("retrieved", "web"):
+                t = text_of(str(u["id"]))
+            items.append({"id": str(u["id"]), "kind": u["kind"], "source": src, "text": t})
+    else:
+        for i in fv["ctx"]:
+            items.append(
+                {
+                    "id": i,
+                    "kind": "retrieved" if i in ret else "web",
+                    "source": "retrieved" if i in ret else "web",
+                    "text": text_of(i),
+                }
+            )
+    missing = [x["id"] for x in items if x["text"] is None]
+    prompt, src = None, "unavailable"
+    if fmt == "mode_b" and row.get("_generation_prompt"):
+        prompt, src = row["_generation_prompt"], "recorded (record_texts)"
+    elif not missing and (fmt != "mode_b" or row.get("_prompt_mode") in (None, "legacy")):
+        if fmt != "mode_b" or all(x["kind"] in ("retrieved", "web") for x in items):
+            prompt = prompts.GENERATE.format(
+                context=prompts.format_context([Document(x["id"], x["text"]) for x in items]),
+                question=row.get("question") or "",
+            )
+            src = "reconstructed (prompts.GENERATE + format_context)"
+    n_ret = sum(x["source"] == "retrieved" for x in items)
+    n_web = sum(x["source"] == "web" for x in items)
+    return {
+        "gen_ctx_ids": ";".join(x["id"] for x in items),
+        "gen_ctx_kinds": ";".join(x["kind"] for x in items),
+        "gen_n_retrieved_in_prompt": n_ret,
+        "gen_n_web_in_prompt": n_web,
+        "gen_retrieval_all_removed": bool(fv["ret_ids"]) and n_ret == 0,
+        "gen_ctx_empty": not items,
+        "gen_web_status": row.get("_web_status")
+        or ("empty" if fv["web_ids"] == [] and row.get("corrective_action") != "correct" else None),
+        "gen_ctx_text_missing": ";".join(missing),
+        "gen_ctx_chars": None if missing else sum(len(x["text"] or "") for x in items),
+        "gen_prompt_source": src,
+        "gen_prompt_chars": None if prompt is None else len(prompt),
+        "gen_prompt_has_gold": None if prompt is None else has_gold(prompt, golds_norm(golds)),
+        "_gen_items": items,
+        "_gen_prompt": prompt,
+    }
+
+
+def golds_norm(golds: list[str]) -> list[str]:
+    from analyze_regression import gold_norms
+
+    return gold_norms(golds)
+
+
+def prompt_card(c: dict) -> list[str]:
+    L = [
+        f"### `{c['query_id']}` ({c['direction']} · {c['action']})",
+        "",
+        f"- 원래 검색 문서가 prompt 에 남았는가: {c['gen_n_retrieved_in_prompt']}개 "
+        f"(전부 제거: {c['gen_retrieval_all_removed']}) | web 문서 {c['gen_n_web_in_prompt']}개 | "
+        f"web 상태 {c['gen_web_status']}",
+        f"- prompt: {c['gen_prompt_source']}, {c['gen_prompt_chars']}자, 정답 문자열 포함 "
+        f"{c['gen_prompt_has_gold']} | 기록된 생성 prompt_tokens {c.get('full_gen_prompt_tokens')}",
+    ]
+    if c["gen_ctx_text_missing"]:
+        L.append(f"- 원문을 찾지 못한 context: {c['gen_ctx_text_missing']}")
+    if c["_gen_prompt"] is not None:
+        L += ["", "```text", c["_gen_prompt"], "```"]
+    else:
+        L += ["", "| # | 종류 | id | 본문 앞부분 |", "|---|---|---|---|"]
+        for i, x in enumerate(c["_gen_items"]):
+            L.append(f"| {i + 1} | {x['kind']} | {x['id']} | {md_cell((x['text'] or '')[:160])} |")
+    return [*L, ""]
 
 
 # ---------------------------------------------------------------- report
@@ -306,6 +420,9 @@ def case_card(c: dict, docs: list[dict]) -> list[str]:
         f"- web 문서 {c['n_web_docs']}개, rewrite: {md_cell(c['rewritten_query'])} "
         f"(질문 내용어 보존율 {c['str_rewrite_recall']})",
         f"- 신호: `{c['signals']}`",
+        f"- 최종 generation 입력: 검색 문서 {c['gen_n_retrieved_in_prompt']}개 / web "
+        f"{c['gen_n_web_in_prompt']}개 (검색 문서 전부 제거 {c['gen_retrieval_all_removed']}), "
+        f"prompt 정답 문자열 {c['gen_prompt_has_gold']} ({c['gen_prompt_source']})",
         "",
         "| 출처 | 순위 | doc | grader 점수 | 구간 | 유지 | 기준 ctx | 정답 문자열 | 본문 앞부분 |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -366,8 +483,21 @@ def build_report(meta: dict, cases: list[dict], docs_by_q: dict, summary: list[d
             md_table(meta["flip_ids"]["not_a_flip"]),
         ]
     L += ["## 1. Incorrect 판정 HARM (우선 분석)", ""]
+    if harm_inc:
+        L += [
+            "| query | 검색 문서 남음 | 전부 제거 | web 문서 | web 상태 | prompt 정답 문자열 | prompt 출처 |",  # noqa: E501
+            "|---|---|---|---|---|---|---|",
+        ]
+        for c in harm_inc:
+            L.append(
+                f"| `{c['query_id']}` | {c['gen_n_retrieved_in_prompt']} | "
+                f"{c['gen_retrieval_all_removed']} | {c['gen_n_web_in_prompt']} | "
+                f"{c['gen_web_status']} | {c['gen_prompt_has_gold']} | {c['gen_prompt_source']} |"
+            )
+        L.append("")
     for c in harm_inc:
         L += case_card(c, docs_by_q[c["query_id"]])
+        L += prompt_card(c)
     if not harm_inc:
         L += ["(없음)", ""]
     L += ["## 2. 나머지 HARM", ""]
@@ -493,6 +623,13 @@ def main(argv=None) -> Path:
             treatment_policy=f.get("_policy_id"),
         )
         c.update(classify(direction, c, d, upper, lower))
+        rw = (full_view(f)["rewritten"] or "").strip()
+        by_q = {str(x["id"]): x.get("text") for x in web_by_query.get(rw, [])}
+
+        def text_of(i, by_q=by_q):
+            return texts.get(i) if i in texts else by_q.get(i, web_by_id.get(i))
+
+        c.update(generation_view(treat["format"], f, text_of, golds))
         c["manual_cause"] = ""
         c["manual_note"] = ""
         c.pop("provisional_bucket", None)
@@ -535,7 +672,13 @@ def main(argv=None) -> Path:
         if out.resolve().is_relative_to(d.resolve()):
             raise ValueError(f"출력 폴더가 run 폴더 안에 있음: {out}")
     out.mkdir(parents=True, exist_ok=False)
-    write_csv(out / "flip_cases.csv", cases)
+    write_csv(out / "flip_cases.csv", [{k: v for k, v in c.items() if k[0] != "_"} for c in cases])
+    with open(out / "generation_inputs.md", "x", encoding="utf-8") as fh:
+        fh.write(
+            "# 비교 run 의 최종 generation 입력 (flip 문항)\n\n"
+            "crag_system 은 prompt 원문이 기록되지 않아 기록된 context id 순서와 원문으로 "
+            "재구성한다.\n\n" + "\n".join(line for c in cases for line in prompt_card(c))
+        )
     write_csv(out / "flip_docs.csv", [x for c in cases for x in docs_by_q[c["query_id"]]])
     write_csv(out / "cause_summary.csv", summary)
     with open(out / "analysis_meta.json", "x", encoding="utf-8") as fh:

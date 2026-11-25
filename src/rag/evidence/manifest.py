@@ -76,7 +76,7 @@ def used_prompts(cfg: dict) -> dict[str, str]:
     }
     if cfg.get("evidence_policy") != "vanilla" and gtype == "llama_prompt":
         out["grade"] = "legacy_grade"
-    if cfg.get("evidence_policy") == "official":
+    if str(cfg.get("evidence_policy", "")).startswith("official"):  # official + fallback ablation
         out["ambiguous"] = "official_ambiguous_template"
     return out
 
