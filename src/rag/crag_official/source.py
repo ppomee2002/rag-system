@@ -62,6 +62,34 @@ POPQA_PROMPT = (
     "Refer to the following documents, follow the instruction and answer the question."
     "\n\nDocuments: {paragraph}\n\nInstruction: Answer the question: {question}"
 )
+# ---- prompt 변경 이력 (공식 저장소 git log, 결과표 img/crag_result.png 이력으로 확인)
+# arXiv 2401.15884: v1 2024-01-29, v2 2024-02-16, v3 2024-10-07 ("Update results ...")
+# 저장소 코드 첫 공개 1b34082 (2024-02-23) ~ 684bd67 (2024-04-06): 모든 task 가 Self-RAG 형식
+#   "### Instruction:\n{q}\n\n### Response:\n[Retrieval]<paragraph>{p}</paragraph>"
+# baadc37 (2024-10-08) + README "2024-10-08: Revise the prompt format in the inference stage to
+#   improve the performance in RAG and CRAG modes": PopQA 는 위 POPQA_PROMPT 로 변경
+#   (generator 가 llama / selfrag_llama 어느 쪽이든 PopQA 는 같은 prompt).
+# 같은 날 결과표 이미지 교체 (243e70b). PopQA 표 값 (이미지에서 읽은 저자 보고값):
+#   v1/v2 시기 표: LLaMA2-hf-7b RAG 37.7 / CRAG 39.8, SelfRAG-LLaMA2-7b RAG 40.3 / CRAG 59.3
+#   2024-10 표    : LLaMA2-hf-7b RAG 50.5 / CRAG 54.9, SelfRAG-LLaMA2-7b RAG 52.8 / CRAG 59.8
+# 즉 v1/v2 수치는 Self-RAG 형식 prompt, v3 수치는 현재 prompt 와 짝이다 (de7c296 = 현재).
+SELFRAG_POPQA_PROMPT = (
+    "### Instruction:\n{question}\n\n### Response:\n[Retrieval]<paragraph>{paragraph}</paragraph>"  # noqa: E501
+)
+PROMPT_VERSIONS = {
+    # 이름: (템플릿, 공식 commit, 짝이 되는 논문 결과표)
+    "v3_2024_10": (POPQA_PROMPT, "baadc37 (2024-10-08) ~ de7c296", "arXiv v3 (2024-10-07)"),
+    "v1v2_selfrag_format": (
+        SELFRAG_POPQA_PROMPT,
+        "1b34082 (2024-02-23) ~ 684bd67 (2024-04-06)",
+        "arXiv v1 (2024-01-29) / v2 (2024-02-16)",
+    ),
+}
+DEFAULT_PROMPT_VERSION = "v3_2024_10"
+# 684bd67 이전 (2024-02-23 ~ 04-06) 의 data_preprocess 는 passages.append 가 for 루프 안에 있어
+# method=rag 문단이 질문과 어긋나는 결함이 있었다 (684bd67 에서 수정). 논문 v1/v2 수치는 코드 공개
+# 이전에 나온 것이므로 이 결함과의 관계는 확인할 수 없다.
+
 # CRAG_Inference.py:224 — temperature 0, top_p 1, max_tokens 100
 GENERATION_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 100}
 RAG_PASSAGE_JOIN = " [sep] "  # CRAG_Inference.py:99 (method=rag 의 문단 결합)

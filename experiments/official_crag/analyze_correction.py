@@ -24,7 +24,8 @@ Correction 발생 범위 (논문 CRAG, Yan et al. 2024 §4 / 공식 CRAG_Inferen
   verification_candidates.csv evidence 가 바뀌어 generation 재실행으로 확인해야 하는 질문
 
 주의
-  - 230문항은 기존 공통 성공 문항 (선택된 집합). 이 결과를 전체 PopQA 정확도로 표현하지 않는다.
+  - C1 공통 문항 (완료 실험 200문항) 은 기존 공통 성공 문항 (선택된 집합).
+    이 결과를 전체 PopQA 정확도로 표현하지 않는다.
   - Grading 중단 시 최종 답 변화는 generation 을 다시 돌려야 확정된다. 여기서는 evidence 변화와
     그로 인한 정답 변화 가능 범위 (상한) 만 낸다.
   - Vanilla 대비 차이는 (official 정책의 경우) refinement + correction 의 결합 효과다.

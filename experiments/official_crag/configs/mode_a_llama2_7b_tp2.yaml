@@ -1,0 +1,51 @@
+# MODE A — 원본 생성 모델 재현: 논문 LLaMA2-hf-7b (Meta 라이선스 동의 필요한 gated 저장소)
+# 이 파일 하나를 두 곳에 쓴다 (추정치 포함, 서버 확인 전):
+#   vLLM launch : CUDA_VISIBLE_DEVICES=0,1 python scripts/server/launch_vllm.py --profile <이 파일>
+#   generate    : mode_a.py generate --config <이 파일> --method rag|crag [--prompt-version ...]
+# 공식: vLLM offline LLM(model, dtype="half") 1장 + SamplingParams(temperature=0, top_p=1,
+#       max_tokens=100, skip_special_tokens=False). README 9.3 의 GPU 검토 참고.
+experiment: official_crag
+experiment_mode: A_official_reproduction
+engine_profile: vllm_llama2_7b_fp16_tp2
+
+llm:
+  provider: vllm
+  api: completions              # chat template 미적용 (공식과 같음)
+  model: meta-llama/Llama-2-7b-hf               # server.model 과 같아야 함 (launch_vllm preflight)
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: VLLM_API_KEY
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 100
+  seed: 0
+  stream: false
+  timeout: 600
+  extra_body:
+    skip_special_tokens: false  # 공식 SamplingParams 와 같음 (제어 토큰은 postprocess 에서 제거)
+  server_scheduling_policy: fcfs
+
+server:
+  vllm_version: "0.33.0"
+  model: meta-llama/Llama-2-7b-hf
+  n_gpus: 2
+  tensor_parallel_size: 2       # A2 15GB 1장에 fp16 7B (가중치 약 12.6GiB) + 4096 KV 가 들어가지 않음
+  dtype: float16                # 공식 dtype="half"
+  quantization: null            # 양자화하지 않음 (공식과 같은 fp16)
+  max_model_len: 4096           # LLaMA2 최대 문맥. 공식 RAG prompt 최장 약 13.4k 자 (추정 약 3.5k 토큰)
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 8
+  generation_config: vllm
+  enable_prefix_caching: false
+  seed: 0
+  port: 8000
+
+deviations:                     # run_meta 에 그대로 기록된다
+  serving: "공식 vLLM 0.2.5 offline generate, GPU 1장 -> vLLM 0.33.0 OpenAI completions, TP=2 (GPU 2장)"
+  tensor_parallel: "TP=2 는 all-reduce 합산 순서가 달라 greedy 결과가 드물게 1장과 다를 수 있음"
+  external_knowledge: "저자 제공 ref/{correct,incorrect,ambiguous} 재사용 (GPT-3.5 + serper 재실행 안 함)"
+  prompt: "--prompt-version 으로 선택 (v3_2024_10 = 현재 코드, v1v2_selfrag_format = 논문 v1/v2 시기)"
+
+estimates:                      # 사양 기반 추정 (검증 전). launch 후 verify_launch.py 결과로 대체
+  weights_gib_per_gpu: 6.3
+  kv_cache_gib_per_gpu: 4.5
+  kv_bytes_per_token: 524288    # 32 layers x 2 (K,V) x 4096 hidden x 2 bytes, TP=2 면 GPU 당 절반

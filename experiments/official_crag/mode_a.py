@@ -13,6 +13,12 @@
                      (Knowledge Refinement 재구현이 공식 결과를 재현하는지 확인)
   generate           2-3 (vLLM, --method crag | rag). crag 는 score 결과 폴더가 필요
   evaluate           4 (+ 이 레포의 정규화 accuracy, 판정별 정확도, 선택 문항 subset)
+  compare            evaluate 두 개 (예: 같은 generator 의 rag vs crag) 를 같은 문항끼리 짝지어 비교
+                     (official_match / acc, 뒤집힌 문항, McNemar, CRAG 판정별)
+
+generate --prompt-version (source.PROMPT_VERSIONS)
+  v3_2024_10            현재 공식 코드 (de7c296) 의 PopQA prompt. arXiv v3 (2024-10) 결과표와 짝
+  v1v2_selfrag_format   2024-02~04 공개 코드의 Self-RAG 형식. arXiv v1/v2 결과표와 짝
 
 공식과 다를 수밖에 없는 것 (README 차이표): generator (논문: LLaMA2-7B / SelfRAG-LLaMA2-7B),
 vLLM 버전 (원본 0.2.5 offline), 외부 지식은 저자 파일 재사용 (GPT-3.5 + serper 재실행 안 함).
@@ -23,6 +29,7 @@ vLLM 버전 (원본 0.2.5 offline), 외부 지식은 저자 파일 재사용 (GP
         --config experiments/official_crag/configs/mode_a_popqa.yaml
     uv run python experiments/official_crag/mode_a.py evaluate --preds <generate run> \
         --answers data/raw/self_rag_eval/popqa_longtail_w_gs.jsonl
+    uv run python experiments/official_crag/mode_a.py compare --a <evaluate rag> --b <evaluate crag>
 """
 
 from __future__ import annotations
@@ -211,8 +218,26 @@ def cmd_generate(a) -> Path:
     n = min(a.limit or len(queries), len(actions) if actions else len(queries))
     engine = build_generator_engine(cfg["llm"])
     run_dir = _run_dir(f"generate_{a.method}", a.run_id)
-    cfg.update(step="generate", method=a.method, scores_run=a.scores, limit=n)
-    _meta(run_dir, cfg, {"deviations": cfg.get("deviations")}, engines={"generator": engine})
+    cfg.update(
+        step="generate",
+        method=a.method,
+        scores_run=a.scores,
+        limit=n,
+        prompt_version=a.prompt_version,
+    )
+    _meta(
+        run_dir,
+        cfg,
+        {
+            "deviations": cfg.get("deviations"),
+            "prompt_version": {
+                "name": a.prompt_version,
+                "official_commits": source.PROMPT_VERSIONS[a.prompt_version][1],
+                "paper_table": source.PROMPT_VERSIONS[a.prompt_version][2],
+            },
+        },
+        engines={"generator": engine},
+    )
     out = JsonlWriter(run_dir / "preds.jsonl")
     preds = []
     for i, q in enumerate(queries[:n]):
@@ -221,7 +246,7 @@ def cmd_generate(a) -> Path:
         else:
             action = actions[i]
             paragraph = knowledge[action][i]  # 공식처럼 strip 만 ('#' 접두 유지)
-        prompt = offgen.format_popqa_prompt(q.question, paragraph)
+        prompt = offgen.format_popqa_prompt(q.question, paragraph, a.prompt_version)
         rec = CallRecorder()
         llm = EngineLLM(engine, recorder=rec)
         raw = llm.generate(prompt, kind="generate", max_tokens=cfg["llm"].get("max_tokens", 100))
@@ -233,6 +258,8 @@ def cmd_generate(a) -> Path:
                 "index": q.index,
                 "question": q.question,
                 "action": action,
+                "method": a.method,
+                "prompt_version": a.prompt_version,
                 "prediction": pred,
                 "raw": raw,
                 "prompt_tokens": c["prompt_tokens"],
@@ -257,12 +284,14 @@ def cmd_evaluate(a) -> Path:
         subset = {
             x.strip() for x in Path(a.subset_ids).read_text(encoding="utf-8").split() if x.strip()
         }
+    gen = generate_info(Path(a.preds))
     run_dir = _run_dir("evaluate", a.run_id)
     cfg = {
         "experiment": "official_crag",
         "step": "evaluate",
         "preds": a.preds,
         "answers": a.answers,
+        "generate": gen,
     }
     _meta(run_dir, cfg, {"alignment": align})
     out = JsonlWriter(run_dir / "per_question.jsonl")
@@ -294,6 +323,7 @@ def cmd_evaluate(a) -> Path:
     n = len(rows)
     summary = {
         "n": n,
+        "generate": gen,
         "official_match": tot["official_match"] / n if n else None,
         "acc_normalized": tot["acc"] / n if n else None,
         "by_action": {
@@ -305,9 +335,137 @@ def cmd_evaluate(a) -> Path:
             **sub,
             "ids_file": a.subset_ids,
             "n_ids": len(subset),
+            # 정답 파일 id 가 PopQA id 와 다르면 0 에 가깝게 나온다 (n_ids 와 비교할 것)
+            "n_unmatched_ids": len(subset) - sub["n"],
             "official_match_rate": sub["official_match"] / sub["n"] if sub["n"] else None,
         },
         "note": "official_match = 공식 eval.py match (대소문자 구분). acc_normalized = rag.eval.metrics.accuracy",  # noqa: E501
+    }
+    write_new(run_dir / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    return run_dir
+
+
+def generate_info(preds_dir: Path) -> dict:
+    """generate run 의 config.yaml 에서 비교 조건 (method, generator, prompt) 을 꺼낸다."""
+    import yaml
+
+    p = preds_dir / "config.yaml"
+    cfg = (yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None) or {}
+    llm = cfg.get("llm") or {}
+    return {
+        "method": cfg.get("method"),
+        "model": llm.get("model"),
+        "api": llm.get("api"),
+        "max_tokens": llm.get("max_tokens"),
+        "temperature": llm.get("temperature"),
+        "top_p": llm.get("top_p"),
+        "extra_body": llm.get("extra_body"),
+        "prompt_version": cfg.get("prompt_version") or source.DEFAULT_PROMPT_VERSION,
+        "scores_run": cfg.get("scores_run"),
+        "limit": cfg.get("limit"),
+    }
+
+
+def _load_eval(d: Path) -> tuple[dict, dict]:
+    summ = json.loads((d / "summary.json").read_text(encoding="utf-8"))
+    rows = {r["index"]: r for r in _read_jsonl(d / "per_question.jsonl")}
+    return summ, rows
+
+
+# rag vs crag 비교에서 같아야 하는 생성 조건 (method 는 달라도 됨)
+COMPARE_KEYS = (
+    "model",
+    "api",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "extra_body",
+    "prompt_version",
+)
+
+
+def cmd_compare(a) -> Path:
+    """evaluate 두 run 을 같은 문항끼리 짝지어 비교 (예: A=rag, B=crag)."""
+    from analyze import mcnemar_p
+
+    sa, ra = _load_eval(Path(a.a))
+    sb, rb = _load_eval(Path(a.b))
+    ga, gb = sa.get("generate") or {}, sb.get("generate") or {}
+    diff = {k: [ga.get(k), gb.get(k)] for k in COMPARE_KEYS if ga.get(k) != gb.get(k)}
+    if diff and not a.allow_condition_diff:
+        raise SystemExit(
+            f"생성 조건이 다름 (method 외): {diff}. 의도한 비교면 --allow-condition-diff"
+        )
+    common = sorted(set(ra) & set(rb))
+    if not common:
+        raise SystemExit("공통 문항 없음")
+    for i in common:
+        qa, qb = ra[i].get("question_id"), rb[i].get("question_id")
+        if qa != qb:
+            raise SystemExit(f"index {i} 의 question_id 가 다름: {qa} != {qb}")
+    only = {"a_only": len(set(ra) - set(rb)), "b_only": len(set(rb) - set(ra))}
+    run_dir = _run_dir("compare", a.run_id)
+    cfg = {"experiment": "official_crag", "step": "compare", "a": a.a, "b": a.b}
+    _meta(run_dir, cfg, {"generate_a": ga, "generate_b": gb, "condition_diff": diff})
+    res: dict = {}
+    for metric in ("official_match", "acc"):
+        harm = gain = both = neither = 0
+        for i in common:
+            x, y = int(ra[i][metric]), int(rb[i][metric])
+            both += x and y
+            neither += (not x) and (not y)
+            harm += x and not y  # A 만 정답
+            gain += y and not x  # B 만 정답
+        n = len(common)
+        res[metric] = {
+            "n": n,
+            "a_rate": (both + harm) / n,
+            "b_rate": (both + gain) / n,
+            "diff_b_minus_a": (gain - harm) / n,
+            "both": both,
+            "neither": neither,
+            "harm_a_only": harm,
+            "gain_b_only": gain,
+            "mcnemar_p": mcnemar_p(harm, gain),
+        }
+    by_action: dict = {}
+    out = JsonlWriter(run_dir / "paired.jsonl")
+    for i in common:
+        act = rb[i].get("action") or ra[i].get("action")
+        x, y = int(ra[i]["official_match"]), int(rb[i]["official_match"])
+        flip = "gain" if y and not x else ("harm" if x and not y else None)
+        d = by_action.setdefault(str(act), {"n": 0, "a": 0, "b": 0, "gain": 0, "harm": 0})
+        d["n"] += 1
+        d["a"] += x
+        d["b"] += y
+        d["gain"] += flip == "gain"
+        d["harm"] += flip == "harm"
+        out.write(
+            {
+                "index": i,
+                "question_id": rb[i].get("question_id"),
+                "action": act,
+                "a_official_match": x,
+                "b_official_match": y,
+                "a_acc": int(ra[i]["acc"]),
+                "b_acc": int(rb[i]["acc"]),
+                "flip_official_match": flip,
+                # 두 지표가 뒤집힘 여부에서 다르면 평가 방식 차이로 생긴 flip
+                "metric_disagree": (x != y) != (int(ra[i]["acc"]) != int(rb[i]["acc"])),
+            }
+        )
+    for d in by_action.values():
+        d["a_rate"], d["b_rate"] = d["a"] / d["n"], d["b"] / d["n"]
+    summary = {
+        "a": {"dir": a.a, **ga},
+        "b": {"dir": a.b, **gb},
+        "condition_diff": diff,
+        "coverage": {"common": len(common), **only},
+        "metrics": res,
+        "by_action_official_match": by_action,
+        "note": "official_match = 공식 eval.py match, acc = 정규화 substring. McNemar 정확 이항 "
+        "(양측). by_action 은 B (없으면 A) 의 CRAG 판정",
     }
     write_new(run_dir / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
     print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -335,10 +493,19 @@ def main(argv=None):
     g.add_argument("--overlay", action="append", default=[])
     g.add_argument("--set", action="append", default=[])
     g.add_argument("--limit", type=int, default=None)
+    g.add_argument(
+        "--prompt-version",
+        default=source.DEFAULT_PROMPT_VERSION,
+        choices=sorted(source.PROMPT_VERSIONS),
+    )
     e = sub.add_parser("evaluate")
     e.add_argument("--preds", required=True)
     e.add_argument("--answers", required=True, help="Self-RAG popqa_longtail_w_gs.jsonl 등")
-    e.add_argument("--subset-ids", default=None, help="질문 id 목록 (예: C1 230문항)")
+    e.add_argument("--subset-ids", default=None, help="질문 id 목록 (예: C1 공통 200문항)")
+    c = sub.add_parser("compare")
+    c.add_argument("--a", required=True, help="evaluate run (기준, 예: rag)")
+    c.add_argument("--b", required=True, help="evaluate run (비교, 예: crag)")
+    c.add_argument("--allow-condition-diff", action="store_true")
     a = ap.parse_args(argv)
     from dotenv import load_dotenv
 
@@ -348,6 +515,7 @@ def main(argv=None):
         "verify-refinement": cmd_verify_refinement,
         "generate": cmd_generate,
         "evaluate": cmd_evaluate,
+        "compare": cmd_compare,
     }[a.cmd]
     print(f"saved -> {fn(a)}")
 

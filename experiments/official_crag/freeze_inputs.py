@@ -1,11 +1,12 @@
 """MODE B 고정 입력 만들기: 문항 ID 목록 + 기존 run 의 PopQA Top-5 (문서와 순서) 고정.
 
     uv run python experiments/official_crag/freeze_inputs.py \
-        --question-ids <230문항 id 파일> \
+        --question-ids <문항 id 파일>   (또는 --question-ids-from-run <run>) \
+        --expect-n 200 \
         --reference-run results/crag_system/smoke/SMOKE-A1-FULL-RETRY/20261110_111726 \
         [--reference-run <다른 run: Top-5 일치 검사용>] \
         [--live-check --config experiments/crag_system/config.yaml]   # FAISS 로 다시 검색해 대조
-        --out results/official_crag/inputs/popqa_c1_230.jsonl
+        --out results/official_crag/inputs/popqa_c1_common.jsonl
 
 검사 (하나라도 실패하면 파일을 만들지 않음):
   질문·정답이 dataset 과 같음, Top-5 존재, 기준 run 간 Top-5 id·순서 일치,
@@ -13,8 +14,12 @@
 --reference-run 없이 --live-check 만 주면 현재 FAISS 검색 결과로 고정한다
 (기존 결과와 대조 불가로 manifest 에 표시).
 
-230문항 ID 목록은 이 레포에 없다 (서버 결과에서 사용자가 지정). 목록 파일의 sha256 을 manifest 에
-남긴다.
+문항 수: 처음 지시서의 "230문항" 은 레포·결과 어디에도 근거가 없었다. 실제 완료된 C1 실험은
+200문항 (crag_system config: dataset.limit 203 - run.warmup_queries 3 = 측정 200) 이므로
+문항 수를 파일 이름에 고정하지 않고, --expect-n 으로 확인하고 manifest 의 n 에 기록한다.
+--question-ids-from-run 은 run 의 queries.jsonl 에서 측정 문항 (warmup·오류 제외) id 를
+기록 순서대로 가져온다. 여러 run 을 주면 모든 run 에 있는 문항만 남긴다 (첫 run 순서).
+문항 ID 목록 (또는 그것을 만든 run 경로) 의 sha256 을 manifest 에 남긴다.
 """
 
 from __future__ import annotations
@@ -49,6 +54,38 @@ def read_ids(path: Path) -> list[str]:
     return lines
 
 
+def ids_from_runs(run_dirs: list[Path]) -> tuple[list[str], dict]:
+    """완료된 run 들의 측정 문항 id (warmup / 오류 제외). 여러 run 이면 교집합 (첫 run 순서)."""
+    per_run = []
+    info = []
+    for d in run_dirs:
+        ids, seen = [], set()
+        n_warm = n_err = 0
+        for r in read_jsonl(d / "queries.jsonl"):
+            if r.get("warmup"):
+                n_warm += 1
+                continue
+            if r.get("error"):
+                n_err += 1
+                continue
+            q = str(r.get("query_id", r.get("question_id")))
+            if q not in seen:
+                seen.add(q)
+                ids.append(q)
+        per_run.append(ids)
+        info.append(
+            {
+                "run": str(d),
+                "n_measured_ok": len(ids),
+                "n_warmup_rows": n_warm,
+                "n_error_rows": n_err,
+            }
+        )
+    common = set.intersection(*(set(x) for x in per_run)) if per_run else set()
+    ordered = [q for q in per_run[0] if q in common] if per_run else []
+    return ordered, {"runs": info, "n_common": len(ordered)}
+
+
 def load_reference(run_dir: Path) -> tuple[dict[str, dict], dict]:
     rows: dict[str, dict] = {}
     for r in read_jsonl(run_dir / "queries.jsonl"):
@@ -63,7 +100,10 @@ def load_reference(run_dir: Path) -> tuple[dict[str, dict], dict]:
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--question-ids", required=True)
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--question-ids")
+    src.add_argument("--question-ids-from-run", action="append", default=None)
+    ap.add_argument("--expect-n", type=int, default=None, help="문항 수 확인 (다르면 실패)")
     ap.add_argument("--reference-run", action="append", default=[])
     ap.add_argument("--live-check", action="store_true")
     ap.add_argument(
@@ -78,10 +118,18 @@ def main(argv=None):
     out = Path(a.out)
     if out.exists():
         raise SystemExit(f"이미 있음 (덮어쓰지 않음): {out}")
-    ids_path = Path(a.question_ids)
-    ids = read_ids(ids_path)
+    ids_from_run_info = None
+    if a.question_ids:
+        ids_path = Path(a.question_ids)
+        ids = read_ids(ids_path)
+        ids_source = str(ids_path)
+    else:
+        ids, ids_from_run_info = ids_from_runs([Path(d) for d in a.question_ids_from_run])
+        ids_source = {"from_runs": a.question_ids_from_run}
     if len(set(ids)) != len(ids):
         raise SystemExit("문항 ID 목록에 중복이 있음")
+    if a.expect_n is not None and len(ids) != a.expect_n:
+        raise SystemExit(f"문항 수 {len(ids)} != --expect-n {a.expect_n} ({ids_from_run_info})")
 
     refs, ref_cfgs = [], []
     for d in a.reference_run:
@@ -141,7 +189,8 @@ def main(argv=None):
         "sha256": file_sha256(out),
         "n": len(items),
         "top_k": a.top_k,
-        "question_ids_file": str(ids_path),
+        "question_ids_file": ids_source,
+        "question_ids_from_runs": ids_from_run_info,
         "question_ids_sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
         "order": "question_ids 파일 순서",
         "reference_runs": a.reference_run,
@@ -151,7 +200,7 @@ def main(argv=None):
         "retriever": (base_cfg or {}).get("retriever"),
         "embedding": (base_cfg or {}).get("embedding"),
         "git": git_info(),
-        "caveat": "230문항은 기존 공통 문항 집합으로 전체 PopQA 일반화 결과가 아님",
+        "caveat": f"{len(items)}문항은 기존 실험의 공통 문항 집합 (전체 PopQA 1,399 일반화 아님)",
         **info,
     }
     write_new(manifest_path_for(out), json.dumps(manifest, indent=2, ensure_ascii=False))

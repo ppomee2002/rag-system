@@ -5,10 +5,10 @@ vLLM 을 띄우기 전에 evaluator 만 GPU 에 올려 점수를 캐시한다.
     # 1) vLLM 없이 (GPU 전체 사용 가능)
     uv run --extra crag --extra official python experiments/official_crag/precompute_scores.py \
         --config experiments/official_crag/config.yaml --set evaluator.device=cuda:0 \
-        --out results/official_crag/score_cache/popqa_c1_230_t5.jsonl
+        --out results/official_crag/score_cache/popqa_c1_common_t5.jsonl
     # 2) 그 다음 vLLM 을 띄우고 MODE B 를 캐시로 실행
     uv run python experiments/official_crag/run.py ... --set evaluator.backend=cache \
-        --set "evaluator.cache_paths=[results/official_crag/score_cache/popqa_c1_230_t5.jsonl]"
+        --set "evaluator.cache_paths=[results/official_crag/score_cache/popqa_c1_common_t5.jsonl]"
 
 계산 대상 (MODE B 파이프라인이 요청할 모든 쌍, 같은 key 규칙):
   - 문서 판정 점수 (truncation 없음, 빈 문서 제외)

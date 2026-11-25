@@ -14,8 +14,8 @@
 #   LIMIT=               smoke 면 숫자 (예: 10)
 #   ONLY="T5-OFF LL-RULE"   일부 조건만
 #
-# 예)  FROZEN=results/official_crag/inputs/popqa_c1_230.jsonl \
-#      WEB_CACHE=results/official_crag/web_cache/popqa230_legacy_rewrite/web_cache.jsonl \
+# 예)  FROZEN=results/official_crag/inputs/popqa_c1_common.jsonl \
+#      WEB_CACHE=results/official_crag/web_cache/popqa_c1_common_legacy_rewrite/web_cache.jsonl \
 #      CRAG_EVALUATOR_PATH=$HOME/models/crag_evaluator/finetuned_t5_evaluator \
 #      LIMIT=10 PURPOSE=smoke PREFIX=SMOKE-C1 bash experiments/official_crag/server/c1_matrix.sh
 set -euo pipefail

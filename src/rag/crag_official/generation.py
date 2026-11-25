@@ -13,14 +13,34 @@ from __future__ import annotations
 from rag.crag_official import source
 
 
-def format_popqa_prompt(question: str, paragraph: str | None) -> str:
+def _fill(template: str, question: str, paragraph: str) -> str:
+    # str.format 을 쓰지 않는다: 문서·질문에 '{' 가 있으면 깨진다
+    out = []
+    rest = template
+    while rest:
+        i_p, i_q = rest.find("{paragraph}"), rest.find("{question}")
+        cands = [(i, k) for i, k in ((i_p, "{paragraph}"), (i_q, "{question}")) if i >= 0]
+        if not cands:
+            out.append(rest)
+            break
+        i, key = min(cands)
+        out.append(rest[:i])
+        out.append(paragraph if key == "{paragraph}" else question)
+        rest = rest[i + len(key) :]
+    return "".join(out)
+
+
+def format_popqa_prompt(
+    question: str, paragraph: str | None, version: str = source.DEFAULT_PROMPT_VERSION
+) -> str:
+    """version: source.PROMPT_VERSIONS (v3_2024_10 = 현재 공식, v1v2_selfrag_format = 논문 v1/v2 시기)."""  # noqa: E501
+    if version not in source.PROMPT_VERSIONS:
+        raise ValueError(f"prompt version: {tuple(source.PROMPT_VERSIONS)} (got {version})")
     if paragraph is None:  # method=no_retrieval: 원본은 None 과 문자열 결합으로 실패한다
         raise ValueError("공식 PopQA prompt 는 paragraph 가 필요 (no_retrieval 은 원본에서도 실패)")
-    paragraph = " ".join(paragraph.split(" ")[:])  # 원본과 같은 (사실상 항등) 처리
-    # str.format 을 쓰지 않는다: 문서에 '{' 가 있으면 깨진다
-    head, _, tail = source.POPQA_PROMPT.partition("{paragraph}")
-    mid, _, end = tail.partition("{question}")
-    return head + paragraph + mid + question + end
+    if version == "v3_2024_10":
+        paragraph = " ".join(paragraph.split(" ")[:])  # 원본과 같은 (사실상 항등) 처리
+    return _fill(source.PROMPT_VERSIONS[version][0], question, paragraph)
 
 
 def postprocess_answer(answer: str) -> str:

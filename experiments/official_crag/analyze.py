@@ -207,7 +207,8 @@ def main(argv=None):
         )
     lines += ["", "paired / agreement: paired.csv, agreement.csv", ""]
     lines.append(
-        "주의: MODE B 는 공식 논문 수치의 재현이 아님. 230문항은 공통 문항 집합 (일반화 결과 아님)."
+        "주의: MODE B 는 공식 논문 수치의 재현이 아님. 고정 문항 (C1 공통 200문항 등) 은 "
+        "공통 문항 집합 (일반화 결과 아님)."
     )
     (out / "report.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"saved -> {out}")

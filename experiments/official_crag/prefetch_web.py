@@ -16,7 +16,7 @@ generator), 실제 외부 검색 (Tavily) 을 한 번 해서 기록한다. 이�
     uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
         --config experiments/official_crag/config.yaml \
         --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
-        --set inputs.frozen_path=$FROZEN --name popqa230_legacy_rewrite
+        --set inputs.frozen_path=$FROZEN --name popqa_c1_common_legacy_rewrite
 
 결과 (이미 있으면 실패): results/official_crag/web_cache/<name>/
   web_cache.jsonl     v2 기록 (query_id, query, provider, params, query_mode, searched_at_utc,

@@ -6,9 +6,9 @@ exp_id: SMOKE-C1                # 결과: results/official_crag/<purpose>/<exp_i
 experiment_mode: B_controlled
 seed: 42
 
-# 고정 입력 (freeze_inputs.py 결과). 기존 PopQA Long-tail 230문항 Top-5
+# 고정 입력 (freeze_inputs.py 결과). 기존 C1 공통 문항 (완료 실험 기준 200문항) Top-5
 inputs:
-  frozen_path: results/official_crag/inputs/popqa_c1_230.jsonl   # + .manifest.json
+  frozen_path: results/official_crag/inputs/popqa_c1_common.jsonl   # + .manifest.json
   limit: null                   # smoke 만 (본 실험은 null)
 
 grader:

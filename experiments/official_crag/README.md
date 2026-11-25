@@ -5,7 +5,7 @@
 FCFS-query scheduler) 위에서 C1·C2·C3 연구를 수행하기 위한 공통 baseline.
 
 - **MODE A — Official Reproduction**: 공식 데이터·evaluator·지식 파일·prompt 로 공식 경로를 단계별로 재현.
-- **MODE B — Controlled Server Comparison**: 기존 PopQA 230문항 Top-5 를 고정하고 grader (공식 T5 / 기존 Llama) 와
+- **MODE B — Controlled Server Comparison**: 기존 C1 공통 문항 (완료 실험 200문항) Top-5 를 고정하고 grader (공식 T5 / 기존 Llama) 와
   evidence 정책만 바꿔 정확도·비용을 비교. **공식 논문 수치의 재현이 아니다.**
 
 > 이 문서의 모든 수치·자원 사용량은 서버 실행 전 추정치이다. 실제 GPU 결과는 아직 없다.
@@ -107,9 +107,9 @@ import 해서 실제 PopQA 데이터로 비교한다 (evaluator 는 양쪽에 �
 
 ### 2.4 확인이 필요한 사항
 
-- **"230개 공통 문항" 은 이 레포의 어느 브랜치에도 없다** (crag_system config 는 `limit: 203`). 문항 ID 목록 파일은
-  서버 결과에서 사용자가 지정한다 (`freeze_inputs.py --question-ids`). 이 집합은 공통 문항으로 선택된 것일 수 있어
-  전체 PopQA 일반화 결과로 쓰지 않는다 (manifest `caveat` 에 기록).
+- **문항 수 정정 (10.1 참고)**: 처음 지시서의 "230문항" 은 레포·결과 어디에도 근거가 없었다. 완료된 C1 실험은
+  200문항 (crag_system `dataset.limit: 203` - `run.warmup_queries: 3`). `freeze_inputs.py --question-ids-from-run ... --expect-n 200` 으로 고정한다.
+  이 집합은 공통 문항으로 선택된 것일 수 있어 전체 PopQA 일반화 결과로 쓰지 않는다 (manifest `caveat` 에 기록).
 
 ---
 
@@ -283,32 +283,32 @@ uv run python experiments/official_crag/mode_a.py generate --method rag     # �
 # 4) 평가 (정답: Self-RAG eval_data 의 popqa_longtail_w_gs.jsonl. Self-RAG README "Download data")
 uv run python experiments/official_crag/mode_a.py evaluate \
     --preds results/official_crag/mode_a/generate_crag/<run_id> \
-    --answers <popqa_longtail_w_gs.jsonl> [--subset-ids <230문항 id 파일>]
+    --answers <popqa_longtail_w_gs.jsonl> [--subset-ids <C1 200문항 id 파일>]
 ```
 
 정답 파일 대신 `data/processed/popqa_longtail.jsonl` 을 줄 수도 있지만 위치·질문 문자열이 모두 같아야 하며,
 다르면 실패한다. MODE A 의 generator 는 기본으로 Llama 3.1 8B AWQ (공식과 다름, `deviations` 에 기록).
-서버에 LLaMA2-7B 가 있으면 `--set llm.model=...` 로 바꾼다.
+RAG vs CRAG 1,399문항 비교 순서는 `server/mode_a_compare.sh` (10.3), 원본 LLaMA2 계열 재현은 10.5 를 따른다.
 
 ### 6.4 MODE B (통제 비교)
 
 ```bash
-# 1) 고정 입력 (230문항 ID 파일 + 기존 Full run 의 Top-5)
+# 1) 고정 입력 (완료된 C1 run 의 측정 문항 200개 + 기존 Full run 의 Top-5)
 uv run python experiments/official_crag/freeze_inputs.py \
-    --question-ids <230문항 id 파일> \
+    --question-ids-from-run <완료된 C1 Vanilla run> --question-ids-from-run <완료된 C1 CRAG run> --expect-n 200 \
     --reference-run results/crag_system/smoke/SMOKE-A1-FULL-RETRY/20261110_111726 \
     --reference-run <같은 Top-5 를 써야 하는 다른 기존 run (선택)> \
     --live-check --config experiments/crag_system/config.yaml \
-    --out results/official_crag/inputs/popqa_c1_230.jsonl
+    --out results/official_crag/inputs/popqa_c1_common.jsonl
 # 2) vLLM (기존 프로필, GPU0. scripts/server/README.md 의 vLLM 전용 venv 에서)
 CUDA_VISIBLE_DEVICES=0 python scripts/server/launch_vllm.py \
     --profile experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml
 # 3) 공유 correction 검색 캐시 (모든 질문 1회 Tavily 검색, 9.3 절). 이후 C1/C2/C3 는 재생만
-export FROZEN=results/official_crag/inputs/popqa_c1_230.jsonl
+export FROZEN=results/official_crag/inputs/popqa_c1_common.jsonl
 uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
     --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
-    --set "inputs.frozen_path=$FROZEN" --name popqa230_legacy_rewrite
-export WEB_CACHE=results/official_crag/web_cache/popqa230_legacy_rewrite/web_cache.jsonl
+    --set "inputs.frozen_path=$FROZEN" --name popqa_c1_common_legacy_rewrite
+export WEB_CACHE=results/official_crag/web_cache/popqa_c1_common_legacy_rewrite/web_cache.jsonl
 #    (기존 crag_system 기록을 쓰려면 WEB_CACHE 대신 REPLAY_RUN=<run 폴더>: 검색어가 같을 때만 재생)
 # 4) smoke (10문항, 공식 T5 + 공식 정책)
 CUDA_VISIBLE_DEVICES=1 EVAL_DEVICE=cuda:0 LIMIT=10 PURPOSE=smoke PREFIX=SMOKE-C1 ONLY="T5-OFF LL-RULE VAN" \
@@ -326,9 +326,9 @@ PAPER=--paper-approved` (git clean, `--limit` 없음 필요). GPU 1장만 쓸 �
 # vLLM 을 띄우기 전
 uv run --extra crag --extra official python experiments/official_crag/precompute_scores.py \
     --set "inputs.frozen_path=$FROZEN" --set "web_search.replay_paths=[$WEB_CACHE]" \
-    --set evaluator.device=cuda:0 --out results/official_crag/score_cache/popqa_c1_230_t5.jsonl
+    --set evaluator.device=cuda:0 --out results/official_crag/score_cache/popqa_c1_common_t5.jsonl
 # vLLM 을 띄운 뒤
-EVAL_BACKEND=cache EVAL_CACHE=results/official_crag/score_cache/popqa_c1_230_t5.jsonl \
+EVAL_BACKEND=cache EVAL_CACHE=results/official_crag/score_cache/popqa_c1_common_t5.jsonl \
     PURPOSE=pre PREFIX=PRE-C1C bash experiments/official_crag/server/c1_matrix.sh
 ```
 
@@ -415,7 +415,7 @@ engine_queue}, e2e_latency, prediction, ground_truth, is_correct, metrics{acc, e
 - 실제 공식 가중치 추론, GPU 메모리, 처리 시간, MODE A/B 정확도 — **서버 실행 전 결과 없음**.
 - MODE A 의 external 지식 재생성 (GPT-3.5 + serper + 페이지 수집): 저자 파일 재사용만 지원.
 - 공식 refinement 재구현이 저자 `ref/correct` 를 실제 가중치로 재현하는지 (`verify-refinement` 로 서버에서 확인).
-- Holdout / 확장 평가 split (230문항 외): `freeze_inputs.py` 로 다른 ID 목록을 고정하면 같은 runner 로 실행 가능하나
+- Holdout / 확장 평가 split (C1 공통 200문항 외): `freeze_inputs.py` 로 다른 ID 목록을 고정하면 같은 runner 로 실행 가능하나
   split 정의는 미정.
 - MODE B live 모드는 가짜 엔진 테스트만 통과 (vLLM 부하 검증은 서버).
 
@@ -487,14 +487,14 @@ correction (query_mode, 검색 조건, 캐시 파일 sha256), 평가 스크립�
 - `replay_on_miss=live`: miss 면 실제 검색하고 그 run 의 `web_cache.jsonl` 에 v2 로 기록 (다음 run 에 추가 가능).
 
 ```bash
-# query_mode 별 공유 캐시 (vLLM 실행 중, 모든 질문 1회 검색 = 230 Tavily 호출)
+# query_mode 별 공유 캐시 (vLLM 실행 중, 모든 질문 1회 검색 = 질문 수 (C1 200) 만큼 Tavily 호출)
 uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
     --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
-    --set "inputs.frozen_path=$FROZEN" --name popqa230_legacy_rewrite
+    --set "inputs.frozen_path=$FROZEN" --name popqa_c1_common_legacy_rewrite
 uv run --extra crag --extra official python experiments/official_crag/prefetch_web.py \
     --overlay experiments/crag_system/configs/engines/vllm_awq_int4_1gpu.yaml \
     --set "inputs.frozen_path=$FROZEN" --set correction.query_mode=official_keywords \
-    --name popqa230_official_keywords
+    --name popqa_c1_common_official_keywords
 # C1/C2/C3 run 에서
 --set web_search.replay_key=query_strict --set "web_search.replay_paths=[$WEB_CACHE]"
 ```
@@ -517,7 +517,7 @@ R=results/official_crag/pre
 uv run python experiments/official_crag/analyze_correction.py \
     --official $R/PRE-C1-T5-OFF/<run_id> --vanilla $R/PRE-C1-VAN/<run_id> \
     --legacy $R/PRE-C1-LL-RULE/<run_id> --keep-all $R/PRE-C1-T5-KEEP/<run_id> \
-    --question-ids <230문항 id 파일> --name c2_correction_pre
+    --question-ids <C1 공통 200문항 id 파일> --name c2_correction_pre
 # (T5 grader 의 legacy 정책과도 비교:  --extra t5_rule=$R/PRE-C1-T5-RULE/<run_id>)
 ```
 
@@ -544,5 +544,137 @@ official 정책은 refinement 를 모든 문서에 대해 한다고 가정한다
 `--set budget.stop_rule=max_docs:k` run 으로 가능, official 정책 + 부분 grading 은 runner 가 거부하므로 판정 강제
 재실행 기능이 필요하다 (미구현).
 
-**주의**: 230문항은 기존 공통 성공 문항 (선택된 집합) 이다. 이 집합의 정확도·Correction 비율을 전체 PopQA 의 일반적인
+**주의**: C1 공통 문항 (완료 실험 200문항, 10.1) 은 기존 공통 성공 문항 (선택된 집합) 이다. 이 집합의 정확도·Correction 비율을 전체 PopQA 의 일반적인
 수치로 표현하지 않는다 (report 에 자동 표기). mock evaluator run 이면 report 맨 위에 MOCK 경고가 붙는다.
+
+---
+
+## 10. C1 후속 확인 (2026-11-25, 로컬 분석·코드만. 서버 결과 없음)
+
+### 10.1 문항 수: 230 vs 200
+
+- "230" 은 처음 작업 지시서의 문구 ("기존 PopQA Long-tail 230문항") 를 그대로 옮긴 것이다. 레포의 어느 브랜치,
+  설정, 스크립트에도 230 이라는 근거는 없었다 (당시 보고서에도 "230문항 집합이 레포에 없음" 으로 적었으나
+  설정 기본 경로 `popqa_c1_common.jsonl` 과 문서에 숫자가 남아 있었다).
+- 실제 완료된 C1 실험의 200문항은 설정에서 이렇게 나온다: `experiments/crag_system/config.yaml`
+  `dataset.limit: 203` (seed shuffle 후 앞 203) - `run.warmup_queries: 3` (측정·workload pool 에서 제외) = **측정 200**.
+- 구분:
+
+| 구분 | 값 | 위치 |
+|---|---|---|
+| crag_system 설정 (입력 pool) | 203 | `experiments/crag_system/config.yaml` `dataset.limit` |
+| crag_system 측정 문항 (결과 파일) | 200 (warmup 3 제외) | 완료 run 의 `queries.jsonl` (`warmup=false` 행), `summary.json` `n_measured` |
+| official_crag MODE B 고정 입력 | 문항 수를 이름에 넣지 않음 | `results/official_crag/inputs/popqa_c1_common.jsonl` + manifest `n` |
+| official_crag MODE B warmup | 고정 입력 앞 3문항을 **한 번 더** 실행 (측정 문항 수는 그대로) | `config.yaml` `run.warmup_queries` |
+
+- 이번 수정: `freeze_inputs.py --question-ids-from-run <완료 run>` (warmup·오류 제외, 여러 run 이면 교집합) 과
+  `--expect-n 200` (다르면 파일을 만들지 않음). 기본 경로 이름을 `popqa_c1_common.jsonl` 로 바꿨다 (이미 만든 파일은
+  `--set inputs.frozen_path=...` 로 그대로 쓸 수 있음, 기존 파일 삭제·덮어쓰기 없음).
+
+### 10.2 Flip 분석 (`analyze_flips.py`)
+
+기준 run (Vanilla) 과 비교 run (CRAG) 의 정답 여부가 뒤집힌 문항을 원인별로 잠정 분류한다. 기존 Flip-20 목록이
+있으면 `--flip-ids` 로 그 20문항만 본다 (`query_id[,direction]` csv / txt / json). crag_system 결과와 MODE B 결과를
+모두 읽는다. 결과 파일·run 폴더는 읽기만 한다.
+
+```bash
+uv run python experiments/official_crag/analyze_flips.py \
+    --baseline <C1 Vanilla run> --treatment <C1 Full CRAG run> \
+    --flip-ids <flip20.csv> --name flip20
+# -> results/official_crag/analysis/flips/flip20/<ts>/{report.md, flip_cases.csv, flip_docs.csv, cause_summary.csv}
+```
+
+| 원인 (primary_cause) | HARM 판정 근거 | GAIN 판정 근거 |
+|---|---|---|
+| 평가 차이 (`evaluation`) | acc (정규화) 와 공식 match (대소문자 구분) 의 뒤집힘 여부가 다름 | 같음 + 정답 문자열이 어느 context 에도 없음 |
+| Grader 오판정 (`grader`) | Vanilla context 의 정답 문서가 빠졌고 그 점수 < 유지 기준 (Incorrect 는 전부 폐기) | (정상 판정) 정답 문서 유지 + 정답 없는 문서 제거 |
+| Evidence 손실 (`evidence`) | 정답 문서 점수가 유지 기준 이상인데 정책상 제거, 또는 평가 전 중단 (budget) | - |
+| 외부 지식 변화 (`external`) | Vanilla 가 근거 문자열 없이 정답 -> CRAG 가 web 으로 context 교체 | web 문서가 없던 정답 문자열을 추가 |
+| Prompt 영향 (`prompt`) | 최종 context 에 정답 문자열이 있는데 오답 | 정답 문서가 양쪽에 있고 형태·순서만 다름 |
+| 판정 보류 (`hold`) | 검색 결과 불일치 / 문서 원문 없음 | 같음 |
+
+- `contributing` 에 함께 성립한 요인을 남긴다 (예: Incorrect HARM 의 `grader` + `evidence` + web 에 정답이 없으면 `external`).
+- report.md 는 **Incorrect 판정 HARM 을 1절에 먼저** 사례 카드 (문서별 grader 점수·유지 여부·정답 문자열·web 문서·rewrite)
+  로 보여 주고, 수동 확인 체크리스트를 붙인다. `flip_cases.csv` 의 `manual_cause` / `manual_note` 에 확인 결과를 적는다.
+- 문자열 지표의 한계 (동명이인·별칭) 때문에 자동 분류는 확정이 아니다. Prompt 영향과 근거 손실을 분리하려면
+  같은 context 로 생성만 바꾸는 재실행이 필요하다 (`exp/crag-system` 브랜치의 `evidence_filter_ablation.py`,
+  이 브랜치에는 없음).
+- 기존 Flip-20 목록 파일과 C1 run 은 로컬에 없어 **실제 20건의 분류 결과는 아직 없다** (서버에서 실행).
+
+### 10.3 MODE A: Llama 3.1 로 RAG vs CRAG (1,399문항, 공식 match)
+
+가능하다. 두 조건은 같은 공식 데이터 (질문당 Contriever 10문서), 같은 prompt·디코딩, 같은 generator 를 쓰고
+지식만 다르다 (RAG = 10문서 `[sep]` 결합, CRAG = T5 판정에 맞는 저자 `ref/*` 줄).
+
+```bash
+SCORES=results/official_crag/mode_a/score/t5_full ANSWERS=<popqa_longtail_w_gs.jsonl> \
+  [SUBSET=<C1 200문항 id 파일>] bash experiments/official_crag/server/mode_a_compare.sh
+```
+
+- `compare` 는 두 evaluate 결과를 같은 index·question_id 로 짝지어 official_match / acc, HARM·GAIN 수, McNemar
+  (정확 이항, 양측), CRAG 판정별 정확도를 낸다. model / api / max_tokens / temperature / top_p / extra_body /
+  prompt_version 이 다르면 거부한다 (method 만 달라야 함).
+- 주의 (해석): Llama 3.1 8B **Instruct** 를 chat template 없이 raw prompt 로 쓰는 것은 공식 방식 그대로지만, 이 모델에는
+  익숙하지 않은 입력 형식이다. 공식 match 는 정답 문자열 포함 여부라 답이 길수록 유리하다 (max_tokens 100).
+  절대 정확도는 논문과 비교하지 않고, 같은 조건에서 RAG 대비 CRAG 의 차이만 본다.
+- 확인할 것: evaluate 의 `alignment` (정답 파일 1,399줄과 질문 순서·문자열 일치), `subset.n_unmatched_ids`
+  (C1 200문항 id 가 정답 파일 id 체계와 같은지 — 다르면 subset 값이 비어 나온다), generate `finish_reason=length` 비율.
+
+### 10.4 Prompt 변경 이력 (공식 저장소 git log + arXiv 기록)
+
+| 시점 | 사건 | PopQA generation prompt |
+|---|---|---|
+| 2024-01-29 | arXiv v1. README 결과표 이미지 (4ea509f, 01-30) | (코드 미공개) |
+| 2024-02-16 | arXiv v2. 결과표 이미지 교체 (7424180, 02-22), PopQA 값은 v1 이미지와 같음 | (코드 미공개) |
+| 2024-02-23 | 코드 첫 공개 (1b34082) | Self-RAG 형식 `### Instruction:\n{q}\n\n### Response:\n[Retrieval]<paragraph>{p}</paragraph>` (모든 task) |
+| 2024-02-26 / 04-06 | 1117339 (`[SEP]` 로 끝나는 줄 처리), 684bd67 (`passages.append` 들여쓰기 수정: 이전에는 RAG 문단이 질문과 어긋남) | 변화 없음 |
+| 2024-10-07 | arXiv v3 ("Update results, add more analysis, and fix typos") | - |
+| 2024-10-08 | baadc37 + README "Revise the prompt format in the inference stage to improve the performance in RAG and CRAG modes", 결과표 이미지 교체 (243e70b) | **현재 prompt** `Refer to the following documents, ...Instruction: Answer the question: {q}` (llama / selfrag 공통) |
+
+저자 결과표의 PopQA 값 (이미지에서 읽은 저자 보고값, 이 레포의 측정값 아님):
+
+| Generator | 표 | RAG | CRAG |
+|---|---|---|---|
+| LLaMA2-hf-7b | v1/v2 시기 (Self-RAG 형식 prompt) | 37.7 | 39.8 |
+| LLaMA2-hf-7b | 2024-10 (현재 prompt) | 50.5 | 54.9 |
+| SelfRAG-LLaMA2-7b | v1/v2 시기 | 40.3 | 59.3 |
+| SelfRAG-LLaMA2-7b | 2024-10 | 52.8 | 59.8 |
+
+- 고정 commit `de7c296` (= 이 재구현) 의 prompt 는 **v3 결과표와 짝**이다. v1/v2 결과는 코드 공개 이전에 나왔으므로
+  당시 실제 실행 코드는 확인할 수 없고, 첫 공개 코드 (Self-RAG 형식) 가 가장 가까운 근거다.
+- prompt 변경으로 RAG baseline 이 크게 오른 반면 SelfRAG CRAG 는 거의 같다 → "CRAG 의 향상 폭" 은 prompt 버전에 따라
+  다르게 보인다. 재현 시 `generate --prompt-version v3_2024_10 | v1v2_selfrag_format` 를 명시하고 짝이 되는 표와만 비교한다.
+- 그 밖의 PopQA 경로: `data/popqa/*` (test_popqa.txt, sources, `ref/*` 지식 파일), `eval.py`, `metrics.py` 는
+  2024-02-23 첫 공개 이후 변경 없음 (`git diff 1b34082 de7c296` 확인). evaluator 입력·threshold 는 CRAG_Inference.py
+  안에서 변경 없음. 지식 준비 스크립트는 지식 파일보다 늦게 공개됐다 (03-01 utils.py 의 검색어 prompt, 03-04 internal/
+  external 준비): 검색어 few-shot prompt 는 공개 이후 그대로 (`{{question}}` 결함 포함), internal refinement 는
+  03-04 에 비-selection 모드 top_n 10 → 6 으로 바뀜 (PopQA 기본 selection 의 top 3 는 그대로).
+
+### 10.5 원본 LLaMA2-7B 재현: A2 15GB x 2 실행 방식 (추정, 서버 확인 필요)
+
+입력 길이 (공식 데이터로 로컬 계산): RAG prompt 최대 13,449자 / 2,145단어 (p99 10,733자), CRAG prompt 최대 8,468자
+(ambiguous). LLaMA2 토크나이저로 RAG 최장이 약 3.5k 토큰으로 추정 → `max_model_len` 4096 (LLaMA2 최대) 이 필요하다.
+
+| 항목 | 추정 |
+|---|---|
+| 가중치 fp16 (6.74B) | 약 12.6 GiB |
+| KV cache (fp16) | 토큰당 0.5 MiB (32 layer x K,V x 4096 x 2B) → 4096 토큰 1개 = 2 GiB |
+| A2 1장 가용 | 약 14.5 GiB (verify_launch 로 확인) |
+
+| 방식 | 설정 | 판단 |
+|---|---|---|
+| **A. vLLM fp16, TP=2 (권장)** | `configs/mode_a_{llama2_7b,selfrag_7b}_tp2.yaml` (launch 프로필 겸 generate 설정). GPU 당 가중치 약 6.3 GiB, KV 여유 충분 | 공식과 같은 fp16·같은 prompt·같은 디코딩. 차이: vLLM 버전, TP all-reduce 로 인한 드문 greedy 차이. A2 는 NVLink 가 없어 PCIe all-reduce (순차 1,399문항이라 시간만 늘어남) |
+| B. vLLM fp16, 1장 + `--cpu-offload-gb` | 수동 실행 (launch 프로필에 옵션 없음): `vllm serve <model> --dtype float16 --max-model-len 4096 --cpu-offload-gb 4 --enforce-eager` | 공식처럼 1장이지만 매 forward 마다 CPU→GPU 전송으로 매우 느림. 메모리 여유도 작아 시작 실패 가능 |
+| C. vLLM fp16, 1장, max_model_len 축소 | 2048 등 | **비권장**: 긴 RAG prompt 가 거부되어 공식 조건과 달라짐 |
+| D. 양자화 (AWQ/GPTQ 4bit) | 1장에 여유 | **비권장 (재현 목적)**: 공식 fp16 과 수치가 다름. 대신 비교용 보조 조건으로만 |
+| E. HF transformers `device_map=auto` (2장에 layer 분할) | 별도 스크립트 필요 (미구현) | TP 수치 차이는 없지만 느림. A 결과 검증용으로만 고려 |
+
+- T5 evaluator: TP=2 vLLM 이 GPU 2장을 모두 쓰므로 `mode_a.py score` 는 **vLLM 실행 전에** 끝낸다 (MODE A 는 점수 →
+  생성이 분리돼 있어 문제 없음). 그 뒤 `server/mode_a_compare.sh` 로 RAG / CRAG 생성.
+- 모델 접근: `meta-llama/Llama-2-7b-hf` 는 Hugging Face 에서 라이선스 동의가 필요한 저장소다. `selfrag/selfrag_llama2_7b`
+  는 CRAG README 가 안내하는 Self-RAG 모델. 둘 다 서버에서 접근·다운로드 가능한지 먼저 확인한다.
+- `skip_special_tokens: false` 를 요청에 넣는다 (공식 SamplingParams 와 같음). SelfRAG 모델의 `[Retrieval]` 같은
+  제어 토큰은 출력에 남은 뒤 `postprocess_answer` 에서 제거된다.
+- 생성 설정이 `generation_config: vllm` 이므로 체크포인트의 generation_config.json 기본값은 쓰지 않는다 (공식 offline
+  `SamplingParams` 명시값과 같은 효과).
+- 시작 전 `launch_vllm.py --dry-run` 으로 명령·GPU 배정·vLLM 옵션 지원 여부를 확인하고, `--smoke` 로 첫 실행한다.
