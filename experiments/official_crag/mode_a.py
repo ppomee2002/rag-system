@@ -188,7 +188,14 @@ def cmd_verify_refinement(a) -> Path:
         "n": n,
         "exact_match": exact,
         "exact_match_rate": exact / n if n else None,
-        "note": "불일치는 점수 미세 차이 (하드웨어·버전) 로 순위가 바뀐 경우일 수 있음 -> refinement.jsonl",  # noqa: E501
+        "note": (
+            "저자 ref/correct 는 공개 코드 (점수순 상위 3, '; ' 결합) 로 만든 파일이 아니다: "
+            "1,399줄 모두 검색 순서를 유지한 문서 부분집합 (1~7개) 의 공백 결합이고, refinement "
+            "코드 공개 (94307fe, 2024-03-04) 이전 커밋 1b34082 (2024-02-23) 에 올라왔다. "
+            "따라서 exact_match 0 은 "
+            "재구현 오류의 근거가 아니다. 원인 분리: experiments/official_crag/diag_refinement.py "
+            "(README 12절)"
+        ),
     }
     write_new(run_dir / "summary.json", json.dumps(summary, indent=2))
     return run_dir

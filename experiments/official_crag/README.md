@@ -43,6 +43,7 @@ FCFS-query scheduler) 위에서 C1·C2·C3 연구를 수행하기 위한 공통 
 | `inference()` 가 질문당 10줄 가정 (`n % 10`) | `ndocs=10` 에서만 공식과 동일 (MODE A 는 10 고정) |
 | `fixed_num` 분해에서 10단어 미만 문서는 IndexError | strip 하나로 둠 (차등 테스트에서 해당 경우만 제외 확인) |
 | internal/external 지식 줄의 `'#'` 접두가 generation 입력에 남음 | MODE A 는 공식대로 유지, MODE B 는 직접 생성하므로 없음 |
+| 저장소의 PopQA `ref/correct` 는 공개 refinement 코드 출력이 아님 (검색 순서 문서 부분집합 1~7개의 공백 결합, 코드보다 먼저 업로드). PopQA `retrieved_psgs` 도 미공개 | MODE A generate 는 공식 inference 대로 저자 파일 사용, MODE B 는 공개 코드 규칙. 12절 |
 
 ### 차등 테스트 (공식 코드 vs 재구현)
 
@@ -417,7 +418,8 @@ engine_queue}, e2e_latency, prediction, ground_truth, is_correct, metrics{acc, e
 
 - 실제 공식 가중치 추론, GPU 메모리, 처리 시간, MODE A/B 정확도 — **서버 실행 전 결과 없음**.
 - MODE A 의 external 지식 재생성 (GPT-3.5 + serper + 페이지 수집): 저자 파일 재사용만 지원.
-- 공식 refinement 재구현이 저자 `ref/correct` 를 실제 가중치로 재현하는지 (`verify-refinement` 로 서버에서 확인).
+- 공식 refinement 재구현이 공식 코드와 실제 가중치에서 같은 점수·Top-3 를 내는지 (`diag_refinement.py compare`, 12절).
+  저자 `ref/correct` 는 공개 코드로 만든 파일이 아니므로 `verify-refinement` 의 exact_match 는 재현 기준이 아니다.
 - Holdout / 확장 평가 split (C1 공통 200문항 외): `freeze_inputs.py` 로 다른 ID 목록을 고정하면 같은 runner 로 실행 가능하나
   split 정의는 미정.
 - MODE B live 모드는 가짜 엔진 테스트만 통과 (vLLM 부하 검증은 서버).
@@ -771,3 +773,73 @@ uv run python experiments/official_crag/pairwise.py \
   데이터셋 dev split) 에서 정하고, 그 데이터·탐색 범위·선택 기준을 결과와 함께 기록한 뒤 테스트셋에서는 한 번만 평가한다.
   dev split 정의는 아직 없다 (8절 "아직 구현·검증되지 않은 것").
 - fallback ablation (11.4) 은 threshold 를 바꾸지 않고 Incorrect 이후의 evidence 처리만 바꾼다.
+
+---
+
+## 12. MODE A Refinement 불일치 진단 (2026-11-26, 로컬 분석 + 서버용 스크립트)
+
+배경: `mode_a.py verify-refinement` 의 exact_match 가 0/10. 공개 코드 (`internal_knowledge_preparation.py`,
+`utils.select_relevants`, selection 모드) 는 점수 상위 3 문서를 `'; '` 로 결합하고 재구현도 그렇게 하는데,
+저자 `ref/correct` 는 문단 순서·개수·결합 방식이 다르다. "T5 점수 미세 차이" 를 가정하지 않고 원인을 나눈다.
+
+### 12.1 로컬에서 확인한 것 (가중치 불필요, `diag_refinement.py provenance`)
+
+| 항목 | 결과 |
+|---|---|
+| `ref/correct` 구성 | **1,399줄 모두** `test_popqa.txt` 의 해당 질문 10문서 중 일부를 **검색 순서 그대로** 공백으로 이은 것과 같음 (공백 정규화 후 정확히 일치). `'; '` 결합 줄 0 |
+| 문서 수 | 가변: 1개 894 / 2개 289 / 3개 120 / 4개 55 / 5개 28 / 6개 11 / 7개 2. 공개 코드는 항상 3개 (`top_n=3`) |
+| 문단 단위 | 문서 전체 (strip 분해 흔적 없음). 원본 문서에 없는 텍스트 0 → **source (입력 문서) 차이는 없음** |
+| `ref/ambiguous` | Knowledge1 이 `ref/correct` 와 1,399/1,399 같음 → 같은 시점·같은 방식으로 생성 |
+| 생성 시점 | `ref/correct`·`ref/ambiguous`·`test_popqa.txt` 는 첫 업로드 `1b34082` (2024-02-23) 이후 변경 없음. refinement 코드 (`internal_knowledge_preparation.py`, `select_relevants`) 는 `94307fe` (2024-03-04) 에 처음 추가 → **파일이 공개 코드보다 먼저 존재** |
+| 입력 파일 | `run_knowledge_preparation.sh` 의 입력 `data/popqa/retrieved_psgs` 는 저장소에 없음 (arc_challenge·bio 만 있음). 재구현은 `test_popqa.txt` 로 `data_process.py:97` 형식을 재구성 |
+| 재구현 vs 공식 함수 (같은 점수) | `tests/test_official_differential.py` 12개 통과: 공식 `select_relevants`·`extract_strips_from_psg` 를 직접 import, 같은 가짜 점수로 150문항 × selection/excerption 에서 문자열·ranking 동일 |
+
+해석: `ref/correct` 는 공개된 selection 코드의 출력이 아니라 **공개 이전 절차 (문서 점수 기준으로 문서를 거르고
+검색 순서로 이어 붙인 것으로 보임)** 로 만든 사전 생성 파일이다. 따라서 verify-refinement 의 0/10 은 구현 오류의
+근거가 아니다. 다만 (a) 재구현과 공식 함수가 **실제 T5 가중치**에서도 같은 점수·Top-3 를 내는지, (b) 저자 파일의
+문서 선택 규칙 (threshold 인지, 몇인지) 은 가중치가 있어야 확인된다 → 12.2.
+
+### 12.2 서버에서 실행 (T5 가중치)
+
+```bash
+# A. 공식 utils.select_relevants (원본 함수 import) vs 재구현: 같은 10문항·같은 문서·같은 가중치
+CUDA_VISIBLE_DEVICES=1 uv run --extra crag --extra official \
+    python experiments/official_crag/diag_refinement.py compare --device cuda:0 --limit 10 \
+    --weights models/crag_evaluator/finetuned_t5_evaluator
+# (선택) batch 영향: --batch-size 8 로 한 번 더
+
+# B. 저자 ref/correct 의 문서 선택 규칙 가설 (기존 score run 재사용, GPU 불필요, 1,399문항)
+uv run python experiments/official_crag/diag_refinement.py rules \
+    --scores results/official_crag/mode_a/score/<run_id>
+
+# (로컬에서도 가능) provenance
+uv run python experiments/official_crag/diag_refinement.py provenance
+```
+
+결과: `results/official_crag/mode_a/diag_refinement/<run_id>/` (새 폴더. 기존 verify_refinement 결과는 건드리지 않음)
+
+- `compare`: `per_question.jsonl` (문항별 공식/재구현 strip 점수, ranking, Top-3 index, 최종 문자열, ref 문서 집합,
+  문서 점수·flag, 분류), `summary.json`, `report.md`
+- `rules`: 판정 (correct/ambiguous/incorrect) 별 가설 일치율
+
+분류 (`classify`):
+
+| 유형 | impl (재구현 vs 공식 코드) | ref (공식 코드 vs 저자 ref/correct) |
+|---|---|---|
+| score | strip 점수 최대 차이 > 1e-4 | – |
+| selection | Top-3 집합 다름 | ref 문서 집합 ≠ 공식 Top-3 집합 |
+| ordering | 같은 집합, 순서 다름 | 같은 집합, 순서 다름 (점수순 vs 검색 순서) |
+| format | 같은 문서·순서, 문자열 다름 | 같은 문서·순서, 결합자·공백만 다름 |
+| source | – | ref 문단이 입력 10문서로 설명되지 않음 |
+
+규칙 가설 (`rule_check`): `top3_set`, `topk_set` (상위 |kept| 개), `thr_upper` (≥0.592), `thr_lower` (≥-0.995),
+`thr_zero`, `global_threshold` (모든 문항에서 kept 최소 점수 > 버린 문서 최대 점수를 동시에 만족하는 t 의 구간).
+
+판정 기준:
+
+- **구현 오류**: compare 의 impl 에 score/selection/ordering/format 이 있음 (특히 점수 차이 > 1e-4).
+- **공식 사전 생성 파일 차이**: impl 이 모두 0 (문자열 10/10 일치) 이고 ref 불일치가 selection/ordering/format,
+  source 0. 12.1 결과로는 이쪽이 예상되지만 서버 compare 로 확정한다.
+
+MODE A 영향: 공식 `CRAG_Inference.py` 는 판정 후 저자 `ref/*` 파일을 읽으므로 MODE A generate 는 공식과 같다
+(변경 없음). MODE B 의 `official` 정책은 공개 코드 규칙 (상위 3, `'; '`) 이므로 MODE A 의 Correct 지식과 다르다.
