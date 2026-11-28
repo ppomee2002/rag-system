@@ -1,0 +1,62 @@
+# C2 Bottleneck-aware Gating (MODE A 위의 B / C / Cbn)
+# 계층: configs/base.yaml + --mode-a-config (정확도 상승 확인 설정:
+#        experiments/official_crag/configs/mode_a_llama2_7b_tp2.yaml) + 이 파일 + --set
+# ** 이 파일에 llm 블록을 넣지 않는다 ** (MODE A generator 설정을 바꾸면 run.py 가 실패한다)
+experiment: c2_gating
+seed: 42
+
+evaluator:                      # MODE A score 와 같은 설정 (mode_a.py _evaluator: t5 / popqa / fp32)
+  backend: t5                   # t5 | mock (로컬 점검, --mock)
+  model_path: null              # null 이면 CRAG_EVALUATOR_PATH
+  device: cuda:0                # CUDA_VISIBLE_DEVICES 기준 (서버: CUDA_VISIBLE_DEVICES=1 -> 물리 GPU1)
+  batch_size: 1                 # backend 기록용 (실제 batching 은 t5_service.batch_size)
+  dtype: float32                # 공식. 변경 금지 (evaluator 점수가 바뀜)
+  task: popqa
+
+t5_service:                     # B / C / Cbn 공통 (한 run 안의 모든 조건이 같은 값)
+  batch_size: 1                 # 1 = 공식
+  memo: false                   # check_memo.py + memo_verify smoke 통과 후에만 true (세 조건 동시에)
+  memo_verify: false            # memo hit 도 다시 계산해 비트 비교 (검증 run 전용)
+
+gating:
+  experiment_mode: controlled_replay
+    # controlled_replay: generation evidence = 저자 사전 생성 지식 (MODE A 와 같은 줄, 고정).
+    #   correction workload 는 실제 실행. -> serving 비용 비교만 주장 (정확도 동일성은 고정의 결과)
+    # runtime_e2e: 실행 중 correction 결과를 generation 에 사용 -> action/evidence/prompt/정확도/성능 비교
+  internal_refinement: run      # 공식 online 경로처럼 correct/ambiguous 에서 internal refinement 실행
+  prompt_version: v3_2024_10    # MODE A generate 와 같게
+  rewrite_max_tokens: 32
+  wiki_prefix: true             # 공식 mode=wiki: "Wikipedia, " 접두
+  record_texts: false
+
+refinement:
+  decompose_mode: selection     # 공식 기본
+
+web:
+  latency_mode: recorded        # recorded: 기록 지연 재현 | zero
+  latency_scale: 1.0
+  wikipedia_only: true          # 공식: 검색 결과 중 wikipedia 페이지 문단만
+  top_k: 5
+
+run:
+  warmup_queries: 3             # 조건마다 측정 전 순차 실행 (측정 집합 밖 질문)
+  gpu_sample_ms: 200            # nvidia-smi 샘플 간격 (0 이면 끔)
+  chain_join_timeout_s: 120
+  allow_web_miss: false
+
+# 공식 CRAG 와 다른 점 (run_meta.json / summary.json 에 그대로 기록)
+deviations:
+  keyword_extraction: "공식 gpt-3.5-turbo-16k -> MODE A generator (meta-llama/Llama-2-7b-hf, 같은 vLLM 서버, 공식 PopQA keyword few-shot prompt, 첫 줄, max_tokens 32)"
+  web_search: "공식 serper.dev (Google) -> Tavily (search_depth basic, top_k 5, include_raw_content). 질문당 1회 기록 후 query_id 로 재생, 기록 지연 재현"
+  page_text: "공식 HTML <p> 문단 -> Tavily raw_content 의 줄 (10자 초과, '제목: 문단'), wikipedia.org 결과만"
+  external_refinement_input: "위 세 가지 때문에 external refinement 의 문단 수 (T5 작업량) 와 web 지연이 공식 원본과 다를 수 있음"
+  controlled_replay_evidence: "generation 은 저자 ref/{correct,incorrect,ambiguous} (MODE A 와 같음). 위 차이는 비용에만 영향"
+  runtime_e2e_evidence: "runtime_e2e 는 위 차이가 generation evidence 에도 들어감 -> MODE A 정확도와 직접 비교 불가 (참고)"
+  internal_refinement: "MODE A 는 ref/correct 사용, 여기서는 공식 selection refinement 를 실제 실행 (controlled_replay 는 비용만)"
+  serving: "T5 (fp32) 와 vLLM (LLaMA2-7B fp16 TP=2) 이 같은 GPU 를 공유할 수 있음 (gpu_plan 참고). vLLM gpu_memory_utilization 을 바꾸면 run_meta 의 vllm_launch 에 기록"
+
+mock:                           # --mock 일 때만
+  t5_seconds_per_pair: 0.005
+  t5_seconds_per_batch: 0.0
+  rewrite_s: 0.02
+  generate_s: 0.02

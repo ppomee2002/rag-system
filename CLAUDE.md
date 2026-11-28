@@ -5,6 +5,7 @@ RAG 실험 레포. 두 실험이 공통 코어를 공유한다.
 - **C-RAG latency** (`experiments/crag_latency/`): Vanilla RAG vs C-RAG 의 품질/E2E latency 비교, C-RAG 단계별(retrieval / grading / rewrite / web_search / generation) latency 분석, 난이도(corrective action)별 비교.
 - **CRAG System** (`experiments/crag_system/`, 브랜치 `exp/crag-system`): LangGraph + vLLM + Custom Scheduler 통합 실험 (`SYS-1`~`SYS-4`). 엔진 추상화 `rag.llm.engine` / 호출 기록 `rag.telemetry`. 서버 점검 스크립트 `scripts/server/` (Claude 는 서버에 접속하지 않음).
 - **Official CRAG Baseline** (`experiments/official_crag/`, 브랜치 `feature/official-crag-baseline`): 공식 CRAG (HuskyInSalt/CRAG@de7c296) 재구현 `rag.crag_official` + C1/C2/C3 공통 인터페이스 `rag.evidence`. MODE A (공식 재현) / MODE B (통제 비교). 공식 코드·가중치는 커밋하지 않음 (`third_party/`, `models/`). MODE B 는 stage 에 `refinement` 추가 (`rag.evidence.pipeline.STAGES_OFFICIAL`).
+- **C2 Gating** (`experiments/c2_gating/`, 브랜치 `exp/c2-gating-mode-a`): MODE A 위의 B / C / Cbn (Bottleneck-aware Gating). T5 공유 queue `rag.crag_official.t5_service` (신규). `--mode-a-config` 의 llm 블록은 바꾸지 않는다.
 - **Chunking** (`experiments/chunking/`): 청킹 전략 비교. 다른 팀원 담당.
 
 ## 명령어
